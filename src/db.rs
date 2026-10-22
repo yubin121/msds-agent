@@ -65,9 +65,23 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE msds_hazards ADD COLUMN IF NOT EXISTS signal_word TEXT",
     "ALTER TABLE msds_translations ADD COLUMN IF NOT EXISTS chunk_no INT NOT NULL DEFAULT 0",
     "ALTER TABLE msds_translations ADD COLUMN IF NOT EXISTS title_ko TEXT",
-    // 번역은 (doc_id, section_no, chunk_no) 단위. 기존 PK(doc_id, section_no)를 유니크 인덱스로 바꾼다
+    // 번역은 (doc_id, product_no, section_no, chunk_no) 단위. 기존 PK(doc_id, section_no)는 지운다
     "ALTER TABLE msds_translations DROP CONSTRAINT IF EXISTS msds_translations_pkey",
-    "CREATE UNIQUE INDEX IF NOT EXISTS msds_translations_chunk_uq ON msds_translations (doc_id, section_no, chunk_no)",
+    // Step 6 보완: 한 PDF에 제품이 여러 개 (product_no 1부터, 단일 제품 문서는 1)
+    "ALTER TABLE msds_sections ADD COLUMN IF NOT EXISTS product_no INT NOT NULL DEFAULT 1",
+    "ALTER TABLE msds_sections ADD COLUMN IF NOT EXISTS product_name TEXT",
+    "ALTER TABLE msds_sections ADD COLUMN IF NOT EXISTS original_no INT",
+    "ALTER TABLE msds_sections DROP CONSTRAINT IF EXISTS msds_sections_pkey",
+    "CREATE UNIQUE INDEX IF NOT EXISTS msds_sections_product_uq ON msds_sections (doc_id, product_no, section_no)",
+    "ALTER TABLE msds_components ADD COLUMN IF NOT EXISTS product_no INT NOT NULL DEFAULT 1",
+    "ALTER TABLE msds_hazards ADD COLUMN IF NOT EXISTS product_no INT NOT NULL DEFAULT 1",
+    "ALTER TABLE msds_hazards ADD COLUMN IF NOT EXISTS note TEXT",
+    // H코드 출처: document(문서에 적힌 코드) / classification(분류에서 변환)
+    "ALTER TABLE msds_hazards ADD COLUMN IF NOT EXISTS source TEXT",
+    "ALTER TABLE msds_translations ADD COLUMN IF NOT EXISTS product_no INT NOT NULL DEFAULT 1",
+    "DROP INDEX IF EXISTS msds_translations_chunk_uq",
+    "CREATE UNIQUE INDEX IF NOT EXISTS msds_translations_product_chunk_uq \
+     ON msds_translations (doc_id, product_no, section_no, chunk_no)",
 ];
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use super::common::{check_section_no, ensure_doc, finish, input_err, parse_input, Fail};
+use super::common::{check_product_no, check_section_no, ensure_doc, finish, first_product, input_err, parse_input, Fail};
 
 pub struct SaveTranslationTool {
     pool: PgPool,
@@ -19,6 +19,8 @@ impl SaveTranslationTool {
 #[derive(Deserialize)]
 struct Input {
     doc_id: String,
+    #[serde(default = "first_product")]
+    product_no: i32,
     section_no: i32,
     #[serde(default)]
     chunk_no: i32,
@@ -31,6 +33,7 @@ impl SaveTranslationTool {
     async fn run(&self, input: Value) -> Result<Value, Fail> {
         let input: Input = parse_input(input)?;
         let doc_id = ensure_doc(&self.pool, &input.doc_id).await?;
+        check_product_no(input.product_no)?;
         check_section_no(input.section_no)?;
         if input.chunk_no < 0 {
             return input_err(format!("chunk_no는 0 이상이어야 합니다: {}", input.chunk_no));
@@ -41,16 +44,22 @@ impl SaveTranslationTool {
         let title_ko = input.title_ko.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM msds_translations WHERE doc_id = $1 AND section_no = $2 AND chunk_no = $3")
-            .bind(doc_id)
-            .bind(input.section_no)
-            .bind(input.chunk_no)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query(
-            "INSERT INTO msds_translations (doc_id, section_no, chunk_no, title_ko, text_ko) VALUES ($1, $2, $3, $4, $5)",
+            "DELETE FROM msds_translations \
+             WHERE doc_id = $1 AND product_no = $2 AND section_no = $3 AND chunk_no = $4",
         )
         .bind(doc_id)
+        .bind(input.product_no)
+        .bind(input.section_no)
+        .bind(input.chunk_no)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO msds_translations (doc_id, product_no, section_no, chunk_no, title_ko, text_ko) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(doc_id)
+        .bind(input.product_no)
         .bind(input.section_no)
         .bind(input.chunk_no)
         .bind(title_ko)
@@ -58,9 +67,11 @@ impl SaveTranslationTool {
         .execute(&mut *tx)
         .await?;
         let chunks: Vec<(i32,)> = sqlx::query_as(
-            "SELECT chunk_no FROM msds_translations WHERE doc_id = $1 AND section_no = $2 ORDER BY chunk_no",
+            "SELECT chunk_no FROM msds_translations \
+             WHERE doc_id = $1 AND product_no = $2 AND section_no = $3 ORDER BY chunk_no",
         )
         .bind(doc_id)
+        .bind(input.product_no)
         .bind(input.section_no)
         .fetch_all(&mut *tx)
         .await?;
@@ -68,6 +79,7 @@ impl SaveTranslationTool {
 
         Ok(json!({
             "doc_id": doc_id,
+            "product_no": input.product_no,
             "section_no": input.section_no,
             "chunk_no": input.chunk_no,
             "chars": input.text_ko.chars().count(),
@@ -82,12 +94,14 @@ impl Tool for SaveTranslationTool {
         ToolDefinition {
             name: "msds_save_translation".into(),
             description: "섹션 번역문을 저장한다. 긴 섹션은 chunk_no(0부터)로 나눠 여러 번 저장하면 chunk_no 순서로 이어 붙여 \
-                          보여준다. 같은 (section_no, chunk_no)로 다시 저장하면 그 조각만 교체된다."
+                          보여준다. 같은 (product_no, section_no, chunk_no)로 다시 저장하면 그 조각만 교체된다. \
+                          다중 제품 문서는 product_no(기본 1)를 적는다."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "doc_id": { "type": "string" },
+                    "product_no": { "type": "integer", "minimum": 1, "default": 1 },
                     "section_no": { "type": "integer", "minimum": 1, "maximum": 16 },
                     "chunk_no": { "type": "integer", "minimum": 0, "default": 0 },
                     "title_ko": { "type": "string", "description": "섹션 제목 번역" },

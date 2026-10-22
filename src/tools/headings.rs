@@ -69,6 +69,38 @@ pub fn backsteps(numbers: &[u32]) -> Vec<(usize, u32, u32)> {
         .collect()
 }
 
+/// 이보다 긴 섹션은 다음 제품이나 다음 섹션 제목을 빠뜨렸을 가능성이 높다
+pub const LONG_SECTION_CHARS: usize = 20_000;
+
+pub fn is_long_section(chars: usize) -> bool {
+    chars > LONG_SECTION_CHARS
+}
+
+/// 위치 순서대로 놓인 (product_no, section_no) 목록을 검사한다.
+/// product_no는 1부터 시작해 같거나 1씩만 늘어야 하고, (product_no, section_no)는 중복되면 안 된다.
+pub fn check_products(entries: &[(i32, i32)]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut prev = 0;
+    for (i, &(p, s)) in entries.iter().enumerate() {
+        let ok = p == prev + 1 || (i > 0 && p == prev);
+        if !ok {
+            return Err(if i == 0 {
+                format!("첫 섹션의 product_no는 1이어야 합니다: {p}")
+            } else {
+                format!(
+                    "sections[{i}]의 product_no {p}가 잘못되었습니다. 위치 순서대로 {prev} 또는 {}이어야 합니다",
+                    prev + 1
+                )
+            });
+        }
+        if !seen.insert((p, s)) {
+            return Err(format!("제품 {p}의 section_no {s}가 중복되었습니다"));
+        }
+        prev = p;
+    }
+    Ok(())
+}
+
 /// 제목 줄을 빼면 내용이 없는지
 pub fn body_is_empty(section_text: &str) -> bool {
     section_text.lines().skip(1).all(|l| l.trim().is_empty())
@@ -122,6 +154,31 @@ mod tests {
         assert_eq!(backsteps(&shuffled), vec![(2, 3, 2), (6, 7, 4), (9, 10, 9), (15, 16, 15)]);
         assert!(backsteps(&[]).is_empty());
         assert!(backsteps(&[3]).is_empty());
+    }
+
+    #[test]
+    fn product_order_rules() {
+        // 단일 제품, 3제품, 옛 양식(번호 순서와 상관없이 위치 순서만 본다)
+        assert!(check_products(&[(1, 1), (1, 2), (1, 16)]).is_ok());
+        assert!(check_products(&[(1, 1), (1, 16), (2, 1), (2, 16), (3, 1)]).is_ok());
+        assert!(check_products(&[(1, 1), (1, 3), (1, 2)]).is_ok());
+        assert!(check_products(&[]).is_ok());
+
+        // 1부터 시작하지 않음, 건너뜀, 줄어듦
+        assert!(check_products(&[(2, 1)]).unwrap_err().contains("1이어야"));
+        assert!(check_products(&[(0, 1)]).unwrap_err().contains("1이어야"));
+        assert!(check_products(&[(1, 1), (3, 1)]).unwrap_err().contains("1 또는 2"));
+        assert!(check_products(&[(1, 1), (2, 1), (1, 2)]).unwrap_err().contains("2 또는 3"));
+
+        // 중복은 같은 제품 안에서만
+        assert!(check_products(&[(1, 2), (1, 2)]).unwrap_err().contains("중복"));
+        assert!(check_products(&[(1, 2), (2, 2)]).is_ok());
+    }
+
+    #[test]
+    fn long_section_threshold() {
+        assert!(!is_long_section(20_000));
+        assert!(is_long_section(20_001));
     }
 
     #[test]

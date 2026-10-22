@@ -73,3 +73,16 @@ pub fn de_opt_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Stri
         Some(other) => Some(other.to_string()),
     })
 }
+
+/// product_no 기본값 (단일 제품 문서)
+pub fn first_product() -> i32 {
+    1
+}
+
+pub fn check_product_no(n: i32) -> Result<(), Fail> {
+    if n >= 1 {
+        Ok(())
+    } else {
+        input_err(format!("product_no는 1 이상이어야 합니다: {n}"))
+    }
+}

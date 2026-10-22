@@ -20,7 +20,7 @@ impl Tool for DocInfoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "msds_doc_info".into(),
-            description: "업로드된 MSDS 문서의 파일명, 페이지 수, 언어(ko/en)를 조회한다.".into(),
+            description: "업로드된 MSDS 문서의 파일명, 페이지 수, 언어(ko/en)와 저장된 제품 목록(product_no, product_name, section_nos)을 조회한다.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -51,11 +51,27 @@ impl Tool for DocInfoTool {
         let Some(row) = row else {
             return Ok(ToolOutput::error(format!("오류: doc_id {doc_id} 문서가 없습니다")));
         };
+
+        // 저장된 제품 목록 (섹션 저장 전이면 빈 목록)
+        let products: Vec<(i32, Option<String>, Vec<i32>)> = sqlx::query_as(
+            "SELECT product_no, max(product_name), array_agg(section_no ORDER BY section_no) \
+             FROM msds_sections WHERE doc_id = $1 GROUP BY product_no ORDER BY product_no",
+        )
+        .bind(doc_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("DB 조회 실패: {e}")))?;
+        let products: Vec<Value> = products
+            .into_iter()
+            .map(|(p, name, secs)| json!({ "product_no": p, "product_name": name, "section_nos": secs }))
+            .collect();
+
         Ok(ToolOutput::success(json!({
             "doc_id": doc_id,
             "file_name": row.get::<Option<String>, _>("file_name"),
             "page_count": row.get::<Option<i32>, _>("page_count"),
             "language": row.get::<Option<String>, _>("language"),
+            "products": products,
         })))
     }
 }

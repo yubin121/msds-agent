@@ -1,5 +1,6 @@
 // 순수 함수
 pub mod cas;
+pub mod classification;
 pub mod ghs;
 pub mod headings;
 pub mod text;

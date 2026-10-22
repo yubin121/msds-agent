@@ -17,15 +17,21 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 에이전트마다 자기 시스템 프롬프트(순서가 아니라 목표)와 자기 툴만 담은 ToolRegistry를 갖는다
 - 메시지에는 doc_id와 섹션 번호만 담는다. 결과는 각 에이전트가 저장 툴로 DB에 직접 저장한다
 - 툴: msds_find_headings, msds_save_sections, msds_get_section, msds_save_components(CAS 체크섬 검증, 틀리면 ToolOutput::error), msds_save_hazards, msds_save_translation
-  - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자)}], total_found, truncated} (최대 200개, 판단은 모델)
-  - msds_save_sections {doc_id, sections:[{section_no 1~16, title, page_no, line_no}]} → {saved:[{section_no, title, chars}], missing_sections, warnings} (본문은 위치로 잘라 저장, 문서 단위 교체)
-  - msds_get_section {doc_id, section_no, offset=0} → {title, text(최대 15000자), offset, total_chars, next_offset|null}
-  - msds_save_components {doc_id, components:[{product_name?, component, cas_no, percent}]} → {rows:[{component, cas_no, cas_valid}], invalid_cas, notice?} (CAS 틀려도 cas_valid=false로 저장, 문서 단위 교체)
-  - msds_save_hazards {doc_id, h_codes:[...], signal_word?} → {pictograms:[{ghs_code, symbol_name, h_codes}], h_codes, no_pictogram, unknown_codes, suppressed_ghs07} (문서 단위 교체)
-  - msds_save_translation {doc_id, section_no, chunk_no=0, title_ko, text_ko} → {chars, saved_chunks} ((doc_id, section_no, chunk_no) 단위 교체)
+  - msds_doc_info {doc_id} → {file_name, page_count, language, products:[{product_no, product_name, section_nos}]}
+  - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자)}], total_found, truncated, order_ok, backsteps} (최대 200개, 판단은 모델. order_ok=false면 저장하지 말고 보고)
+  - msds_save_sections {doc_id, sections:[{product_no=1, product_name?, section_no 1~16(표준 번호), original_no?, title, page_no, line_no}]} → {products:[{product_no, product_name, sections:[{section_no, original_no, title, chars}], missing_sections, warnings}]} (본문은 위치로 잘라 저장, 문서 단위 교체, 2만 자 넘는 섹션 경고)
+  - msds_get_section {doc_id, product_no=1, section_no, offset=0} → {product_no, product_name, section_no, original_no, title, text(최대 15000자), offset, total_chars, next_offset|null}
+  - msds_save_components {doc_id, product_no=1, product_name?, components:[{product_name?, component, cas_no, percent}]} → {rows:[{component, cas_no, cas_valid}], invalid_cas, notice?} (CAS 틀려도 cas_valid=false로 저장, (doc_id, product_no) 단위 교체)
+  - msds_save_hazards {doc_id, product_no=1, h_codes?, classifications?:[{hazard_class(enum), category}], signal_word?, note?} → {status(ok|no_h_codes), pictograms:[{ghs_code, symbol_name, h_codes}], h_codes:[{h_code, sources, evidence, pictograms}], no_pictogram, unknown_codes, unknown_classifications, suppressed_ghs07, warnings} ((doc_id, product_no) 단위 교체)
+  - msds_save_translation {doc_id, product_no=1, section_no, chunk_no=0, title_ko, text_ko} → {chars, saved_chunks} ((doc_id, product_no, section_no, chunk_no) 단위 교체)
   - 입력 오류는 ToolOutput::error("오류: 이유"), DB 장애만 Err(ToolError::ExecutionFailed)
 - 테이블: msds_documents, msds_pages, msds_sections, msds_components, msds_hazards, msds_translations (CREATE TABLE IF NOT EXISTS, 프로시저·트리거 금지)
-- 그림문자는 2번 섹션 H코드·문구로 판단한다 (이미지 블록 미지원)
+- 다중 제품: 한 PDF에 MSDS가 여러 개 이어 붙은 경우(1번 섹션이 여러 번 나옴) product_no를 위치 순서대로 1부터 붙인다. 단일 제품 문서는 product_no 1(기본값). 성분·유해성·번역은 제품마다 따로 저장한다
+- 표준 번호 맞추기: section_no는 문서에 찍힌 번호가 아니라 제목의 뜻에 따른 GHS 표준 번호다. 옛 양식(2=성분, 3=유해성)은 성분을 section_no 3·original_no 2로, 유해성을 section_no 2·original_no 3으로 저장한다
+- 그림문자는 유해성 섹션(표준 2번)의 H코드와 분류로 판단한다 (이미지 블록 미지원)
+  - 문서에 H코드가 없고 분류만 있으면 classifications로 보내 툴이 H코드로 바꾼다. 코드별 출처는 msds_hazards.source(document / classification)
+  - H코드도 분류도 없으면(GHS 이전 양식, HMIS·NFPA만 있음) 추측하지 않는다. note에 이유를 적어 h_code NULL 한 행으로 저장하고 status는 no_h_codes
+  - GHS07 우선순위는 KOSHA 경고표지 작성 지침(W-14-2022): GHS06이 있으면 GHS07 전부 생략, GHS05(H314·H318)가 있으면 H315·H319의 GHS07 생략, H334가 있으면 H315·H317·H319의 GHS07 생략
 
 # 반드시 지킬 구현 규칙
 - 툴 결과는 문자 경계에서 자른다 (바이트 슬라이싱 금지)

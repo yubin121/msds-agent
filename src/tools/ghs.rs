@@ -89,9 +89,12 @@ pub fn classify(inputs: &[String]) -> GhsResult {
         }
     }
 
-    let all: Vec<&str> = parsed.iter().flat_map(|(_, n, _)| pictograms_for(*n)).collect();
-    let has06 = all.contains(&"GHS06");
-    let has05 = all.contains(&"GHS05");
+    // 우선순위 (KOSHA 경고표지 작성 지침 W-14-2022)
+    // - GHS06이 있으면 GHS07은 이유와 상관없이 전부 뺀다
+    // - GHS05가 H314·H318에서 왔으면 피부·눈 자극(H315, H319)의 GHS07을 뺀다 (H290만으로는 적용 안 함)
+    // - H334(GHS08)가 있으면 피부 과민·자극(H315, H317, H319)의 GHS07을 뺀다
+    let has06 = parsed.iter().any(|(_, n, _)| pictograms_for(*n).contains(&"GHS06"));
+    let has05_skin_eye = parsed.iter().any(|(_, n, _)| matches!(n, 314 | 318));
     let has334 = parsed.iter().any(|(_, n, _)| *n == 334);
 
     for (code, num, source) in parsed {
@@ -100,10 +103,10 @@ pub fn classify(inputs: &[String]) -> GhsResult {
             res.no_pictogram.push(code.clone());
         }
         if pics.contains(&"GHS07") {
-            let reason = if has06 && matches!(num, 302 | 312 | 332) {
-                Some("GHS06이 있어 급성독성에 따른 GHS07 생략")
-            } else if has05 && matches!(num, 315 | 319) {
-                Some("GHS05가 있어 피부·눈 자극에 따른 GHS07 생략")
+            let reason = if has06 {
+                Some("GHS06이 있어 GHS07 생략")
+            } else if has05_skin_eye && matches!(num, 315 | 319) {
+                Some("GHS05(H314·H318)가 있어 피부·눈 자극에 따른 GHS07 생략")
             } else if has334 && matches!(num, 315 | 317 | 319) {
                 Some("GHS08(H334)이 있어 피부 과민·자극에 따른 GHS07 생략")
             } else {
@@ -171,13 +174,20 @@ mod tests {
     }
 
     #[test]
-    fn ghs06_suppresses_acute_tox_ghs07_only() {
-        // H302(급성독성)의 GHS07은 빠지고 H335(호흡기 자극)의 GHS07은 남는다
+    fn ghs06_suppresses_every_ghs07() {
+        // 급성독성(H302)뿐 아니라 호흡기 자극(H335) 등 다른 이유의 GHS07도 모두 뺀다
         assert_eq!(pics(&["H301", "H302"]), vec!["GHS06"]);
-        let r = classify(&["H301".into(), "H302".into(), "H335".into()]);
-        assert_eq!(r.pictograms["GHS07"], vec!["H335"]);
-        assert_eq!(r.suppressed.len(), 1);
-        assert_eq!(r.suppressed[0].0, "H302");
+        let r = classify(&["H301".into(), "H302".into(), "H335".into(), "H317".into()]);
+        assert_eq!(r.pictograms.keys().copied().collect::<Vec<_>>(), vec!["GHS06"]);
+        let suppressed: Vec<&str> = r.suppressed.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(suppressed, vec!["H302", "H335", "H317"]);
+    }
+
+    #[test]
+    fn hydrofluoric_acid_kosha_case() {
+        // 34번 불산: GHS05(H290·H314·H318), GHS06(H310), GHS08(H370·H372), H317의 GHS07은 GHS06 때문에 생략
+        let codes = ["H290", "H310", "H314", "H317", "H318", "H370", "H372"];
+        assert_eq!(pics(&codes), vec!["GHS05", "GHS06", "GHS08"]);
     }
 
     #[test]
@@ -186,6 +196,13 @@ mod tests {
         assert_eq!(pics(&["H318", "H319", "H336"]), vec!["GHS05", "GHS07"]);
         // GHS05가 있어도 H317(피부 과민)의 GHS07은 남는다
         assert_eq!(pics(&["H314", "H317"]), vec!["GHS05", "GHS07"]);
+    }
+
+    #[test]
+    fn ghs05_from_h290_only_keeps_irritation_ghs07() {
+        // 금속 부식성(H290)만으로 붙은 GHS05는 피부·눈 자극 규칙을 적용하지 않는다
+        assert_eq!(pics(&["H290", "H315", "H319"]), vec!["GHS05", "GHS07"]);
+        assert_eq!(pics(&["H290", "H318", "H319"]), vec!["GHS05"]);
     }
 
     #[test]
