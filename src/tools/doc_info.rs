@@ -36,10 +36,10 @@ impl Tool for DocInfoTool {
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let Some(raw) = input.get("doc_id").and_then(Value::as_str) else {
-            return Ok(ToolOutput::error("doc_id(문자열)가 필요합니다"));
+            return Ok(ToolOutput::error("오류: doc_id(문자열)가 필요합니다"));
         };
         let Ok(doc_id) = Uuid::parse_str(raw.trim()) else {
-            return Ok(ToolOutput::error(format!("doc_id가 UUID 형식이 아닙니다: {raw}")));
+            return Ok(ToolOutput::error(format!("오류: doc_id가 UUID 형식이 아닙니다: {raw}")));
         };
 
         let row = sqlx::query("SELECT file_name, page_count, language FROM msds_documents WHERE id = $1")
@@ -49,7 +49,7 @@ impl Tool for DocInfoTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("DB 조회 실패: {e}")))?;
 
         let Some(row) = row else {
-            return Ok(ToolOutput::error(format!("doc_id {doc_id} 문서가 없습니다")));
+            return Ok(ToolOutput::error(format!("오류: doc_id {doc_id} 문서가 없습니다")));
         };
         Ok(ToolOutput::success(json!({
             "doc_id": doc_id,

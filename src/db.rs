@@ -58,6 +58,16 @@ const MIGRATIONS: &[&str] = &[
         text_ko TEXT,
         PRIMARY KEY (doc_id, section_no)
     )",
+    // Step 6: 툴이 쓰는 컬럼 추가 (기존 DB와 새 DB 모두 같은 경로로 맞춘다)
+    "ALTER TABLE msds_sections ADD COLUMN IF NOT EXISTS page_no INT",
+    "ALTER TABLE msds_sections ADD COLUMN IF NOT EXISTS line_no INT",
+    "ALTER TABLE msds_hazards ADD COLUMN IF NOT EXISTS h_code TEXT",
+    "ALTER TABLE msds_hazards ADD COLUMN IF NOT EXISTS signal_word TEXT",
+    "ALTER TABLE msds_translations ADD COLUMN IF NOT EXISTS chunk_no INT NOT NULL DEFAULT 0",
+    "ALTER TABLE msds_translations ADD COLUMN IF NOT EXISTS title_ko TEXT",
+    // 번역은 (doc_id, section_no, chunk_no) 단위. 기존 PK(doc_id, section_no)를 유니크 인덱스로 바꾼다
+    "ALTER TABLE msds_translations DROP CONSTRAINT IF EXISTS msds_translations_pkey",
+    "CREATE UNIQUE INDEX IF NOT EXISTS msds_translations_chunk_uq ON msds_translations (doc_id, section_no, chunk_no)",
 ];
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {

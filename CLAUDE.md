@@ -17,6 +17,13 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 에이전트마다 자기 시스템 프롬프트(순서가 아니라 목표)와 자기 툴만 담은 ToolRegistry를 갖는다
 - 메시지에는 doc_id와 섹션 번호만 담는다. 결과는 각 에이전트가 저장 툴로 DB에 직접 저장한다
 - 툴: msds_find_headings, msds_save_sections, msds_get_section, msds_save_components(CAS 체크섬 검증, 틀리면 ToolOutput::error), msds_save_hazards, msds_save_translation
+  - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자)}], total_found, truncated} (최대 200개, 판단은 모델)
+  - msds_save_sections {doc_id, sections:[{section_no 1~16, title, page_no, line_no}]} → {saved:[{section_no, title, chars}], missing_sections, warnings} (본문은 위치로 잘라 저장, 문서 단위 교체)
+  - msds_get_section {doc_id, section_no, offset=0} → {title, text(최대 15000자), offset, total_chars, next_offset|null}
+  - msds_save_components {doc_id, components:[{product_name?, component, cas_no, percent}]} → {rows:[{component, cas_no, cas_valid}], invalid_cas, notice?} (CAS 틀려도 cas_valid=false로 저장, 문서 단위 교체)
+  - msds_save_hazards {doc_id, h_codes:[...], signal_word?} → {pictograms:[{ghs_code, symbol_name, h_codes}], h_codes, no_pictogram, unknown_codes, suppressed_ghs07} (문서 단위 교체)
+  - msds_save_translation {doc_id, section_no, chunk_no=0, title_ko, text_ko} → {chars, saved_chunks} ((doc_id, section_no, chunk_no) 단위 교체)
+  - 입력 오류는 ToolOutput::error("오류: 이유"), DB 장애만 Err(ToolError::ExecutionFailed)
 - 테이블: msds_documents, msds_pages, msds_sections, msds_components, msds_hazards, msds_translations (CREATE TABLE IF NOT EXISTS, 프로시저·트리거 금지)
 - 그림문자는 2번 섹션 H코드·문구로 판단한다 (이미지 블록 미지원)
 
