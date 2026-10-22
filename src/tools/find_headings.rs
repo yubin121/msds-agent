@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use super::common::{ensure_doc, finish, input_err, parse_input, Fail};
-use super::headings::heading_number;
+use super::headings::{backsteps, heading_number};
 use super::text::truncate_chars;
 
 const MAX_RESULTS: usize = 200;
@@ -40,29 +40,47 @@ impl FindHeadingsTool {
             return input_err("이 문서에는 추출된 페이지 텍스트가 없습니다");
         }
 
-        let mut headings = Vec::new();
-        let mut total = 0usize;
+        // (page_no, line_no, number, line)
+        let mut found = Vec::new();
         for (page_no, text) in &pages {
             for (i, line) in text.as_deref().unwrap_or("").lines().enumerate() {
-                let Some(n) = heading_number(line) else { continue };
-                total += 1;
-                if headings.len() < MAX_RESULTS {
-                    headings.push(json!({
-                        "page_no": page_no,
-                        "line_no": i + 1,
-                        "number": n,
-                        "text": truncate_chars(line.trim(), MAX_LINE_CHARS).0,
-                    }));
+                if let Some(n) = heading_number(line) {
+                    found.push((*page_no, i + 1, n, line));
                 }
             }
         }
 
+        let numbers: Vec<u32> = found.iter().map(|f| f.2).collect();
+        let steps: Vec<Value> = backsteps(&numbers)
+            .into_iter()
+            .map(|(i, from, to)| json!({ "page_no": found[i].0, "line_no": found[i].1, "from": from, "to": to }))
+            .collect();
+        let order_ok = steps.is_empty();
+        let headings: Vec<Value> = found
+            .iter()
+            .take(MAX_RESULTS)
+            .map(|(page_no, line_no, n, line)| {
+                json!({
+                    "page_no": page_no,
+                    "line_no": line_no,
+                    "number": n,
+                    "text": truncate_chars(line.trim(), MAX_LINE_CHARS).0,
+                })
+            })
+            .collect();
+
         Ok(json!({
             "doc_id": doc_id,
             "headings": headings,
-            "total_found": total,
-            "truncated": total > MAX_RESULTS,
-            "note": "패턴으로 찾은 후보다. 표 번호나 목록 번호가 섞여 있을 수 있으니 진짜 섹션 제목만 골라라.",
+            "total_found": found.len(),
+            "truncated": found.len() > MAX_RESULTS,
+            "order_ok": order_ok,
+            "backsteps": steps,
+            "note": if order_ok {
+                "패턴으로 찾은 후보다. 표 번호나 목록 번호가 섞여 있을 수 있으니 진짜 섹션 제목만 골라라."
+            } else {
+                "섹션 순서가 뒤섞인 문서다. 저장하지 말고 보고하라"
+            },
         }))
     }
 }

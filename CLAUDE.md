@@ -35,6 +35,10 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - LlmConfig: timeout_secs 120 이상, temperature None, max_tokens는 에이전트별로 지정(번역 8192 이상)
 - CLAUDE_MODEL이 비어 있으면 서버 시작 시 오류로 종료한다
 - PDF 추출은 spawn_blocking 안에서 하고, panic은 오류로 바꿔 저장한다
+- PDF 텍스트는 좌표 기준으로 줄을 정렬한다(기존 서비스 hybrid_extract.py와 같은 방식)
+  - 줄 안은 글자가 아니라 덩어리(그린 순서에서 이어지는 글자들) 단위로 x 정렬한다. 폰트 폭 정보가 틀린 PDF가 있어 글자 단위로 정렬하면 옆 칸과 섞인다
+  - 좌표 방식이 실패하거나 결과가 비면 기본 추출(extract_text_from_mem_by_pages)로 대신한다
+  - 공백을 뺀 글자 수 합이 200 미만이면 status='failed', error="텍스트가 없는 PDF입니다(스캔본일 수 있음)"
 - sqlx는 query! 매크로 대신 sqlx::query() 함수를 쓴다
 - 업로드 라우트에 DefaultBodyLimit 20MB
 - 샘플 PDF와 업로드 파일은 data/ 아래에만 둔다 (git 제외)

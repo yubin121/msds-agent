@@ -58,6 +58,17 @@ pub fn slice_sections(pages: &[(i32, String)], starts: &[(i32, i32)]) -> Result<
         .collect())
 }
 
+/// 후보 번호 목록에서 번호가 줄어든 곳의 (인덱스, 앞 번호, 뒤 번호).
+/// 1로 돌아가는 것은 다음 제품의 시작이라 정상으로 보고 넣지 않는다.
+pub fn backsteps(numbers: &[u32]) -> Vec<(usize, u32, u32)> {
+    numbers
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[1] < w[0] && w[1] != 1)
+        .map(|(i, w)| (i + 1, w[0], w[1]))
+        .collect()
+}
+
 /// 제목 줄을 빼면 내용이 없는지
 pub fn body_is_empty(section_text: &str) -> bool {
     section_text.lines().skip(1).all(|l| l.trim().is_empty())
@@ -99,6 +110,18 @@ mod tests {
         assert_eq!(out, vec!["1. 제품명\n물", "2. 유해성\n계속되는 2번", "3. 구성성분\n물 100%"]);
         assert!(!body_is_empty(&out[0]));
         assert!(body_is_empty("4. 응급조치\n  \n"));
+    }
+
+    #[test]
+    fn backsteps_detects_shuffled_order() {
+        assert!(backsteps(&[1, 2, 3, 4, 5, 16]).is_empty());
+        // 다음 제품(1로 돌아감)과 이어지는 페이지의 반복 제목(같은 번호)은 정상
+        assert!(backsteps(&[1, 2, 16, 1, 2, 2, 3, 16, 1]).is_empty());
+        // NO.6 터치크린 기존 추출 순서
+        let shuffled = [1, 3, 2, 5, 6, 7, 4, 8, 10, 9, 11, 12, 13, 14, 16, 15];
+        assert_eq!(backsteps(&shuffled), vec![(2, 3, 2), (6, 7, 4), (9, 10, 9), (15, 16, 15)]);
+        assert!(backsteps(&[]).is_empty());
+        assert!(backsteps(&[3]).is_empty());
     }
 
     #[test]

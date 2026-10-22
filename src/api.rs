@@ -13,7 +13,7 @@ use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::pdf;
+use crate::{db, pdf};
 
 const UPLOAD_DIR: &str = "data/uploads";
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -90,8 +90,8 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
         .await
         .map_err(internal)?;
 
-    let pages = match pdf::extract_pages(bytes).await {
-        Ok(pages) => pages,
+    let extracted = match pdf::extract_pages(bytes).await {
+        Ok(x) => x,
         Err(e) => {
             tracing::warn!(%doc_id, "{e}");
             sqlx::query("UPDATE msds_documents SET status = 'failed', error = $2, updated_at = now() WHERE id = $1")
@@ -104,31 +104,14 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
         }
     };
 
-    let language = pdf::detect_language(&pages.concat());
-    let page_count = pages.len() as i32;
-
-    let mut tx = st.pool.begin().await.map_err(internal)?;
-    for (i, text) in pages.iter().enumerate() {
-        // PostgreSQL TEXT는 NUL 문자를 저장할 수 없다
-        let text = text.replace('\0', "");
-        sqlx::query("INSERT INTO msds_pages (doc_id, page_no, text) VALUES ($1, $2, $3)")
-            .bind(doc_id)
-            .bind(i as i32 + 1)
-            .bind(text)
-            .execute(&mut *tx)
-            .await
-            .map_err(internal)?;
+    let saved = db::save_pages(&st.pool, doc_id, &extracted.pages).await.map_err(internal)?;
+    let (page_count, language) = (saved.page_count, saved.language);
+    if saved.no_text {
+        tracing::warn!(%doc_id, chars = saved.chars, "{}", pdf::NO_TEXT_ERROR);
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, pdf::NO_TEXT_ERROR.into()));
     }
-    sqlx::query("UPDATE msds_documents SET language = $2, page_count = $3, updated_at = now() WHERE id = $1")
-        .bind(doc_id)
-        .bind(language)
-        .bind(page_count)
-        .execute(&mut *tx)
-        .await
-        .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
 
-    tracing::info!(%doc_id, page_count, language, "업로드 완료");
+    tracing::info!(%doc_id, page_count, language, fallback = extracted.fallback, "업로드 완료");
     Ok(Json(json!({
         "doc_id": doc_id,
         "file_name": file_name,

@@ -15,9 +15,9 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str);
 
-    // tool-test는 LLM을 쓰지 않으므로 CLAUDE_MODEL 검사를 건너뛴다
+    // tool-test, reextract는 LLM을 쓰지 않으므로 CLAUDE_MODEL 검사를 건너뛴다
     let model = std::env::var("CLAUDE_MODEL").unwrap_or_default();
-    if command != Some("tool-test") && model.trim().is_empty() {
+    if !matches!(command, Some("tool-test" | "reextract")) && model.trim().is_empty() {
         tracing::error!("CLAUDE_MODEL이 비어 있습니다. .env를 확인하세요");
         std::process::exit(1);
     }
@@ -59,8 +59,16 @@ async fn main() {
             }
             return;
         }
+        // cargo run -- reextract : data/uploads의 원본으로 모든 문서의 msds_pages를 다시 만든다
+        Some("reextract") => {
+            if let Err(e) = reextract(&pool).await {
+                tracing::error!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some(other) => {
-            tracing::error!("알 수 없는 명령: {other} (loop-test, tool-test 또는 인자 없이 서버 실행)");
+            tracing::error!("알 수 없는 명령: {other} (loop-test, tool-test, reextract 또는 인자 없이 서버 실행)");
             std::process::exit(2);
         }
         None => {}
@@ -137,4 +145,86 @@ async fn tool_test(pool: sqlx::PgPool, name: &str, raw: &str) -> Result<(), Stri
         }
         Err(e) => Err(format!("툴 실행 Err: {e}")),
     }
+}
+
+/// 모든 문서를 원본 PDF로 다시 추출하고, 기존 대비 비교 표를 출력한다.
+async fn reextract(pool: &sqlx::PgPool) -> Result<(), String> {
+    use tools::headings::{backsteps, heading_number};
+
+    fn heading_numbers(pages: &[String]) -> Vec<u32> {
+        pages.iter().flat_map(|p| p.lines().filter_map(heading_number)).collect()
+    }
+    fn seq(nums: &[u32]) -> String {
+        nums.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+    }
+
+    let docs: Vec<(uuid::Uuid, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, file_name, file_path FROM msds_documents ORDER BY file_name")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("문서 조회 실패: {e}"))?;
+
+    println!("| 파일명 | 페이지 | 공백 제외 글자 (기존 → 새, 차이) | 후보 수 (기존 → 새) | 뒤로 가기 (기존 → 새) | 새 후보 번호 순서 | 비고 |");
+    println!("|---|---|---|---|---|---|---|");
+    for (id, file_name, file_path) in docs {
+        let name = file_name.unwrap_or_else(|| id.to_string());
+        let path = file_path.unwrap_or_else(|| format!("data/uploads/{id}.pdf"));
+
+        let old: Vec<(Option<String>,)> =
+            sqlx::query_as("SELECT text FROM msds_pages WHERE doc_id = $1 ORDER BY page_no")
+                .bind(id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| format!("페이지 조회 실패: {e}"))?;
+        let old: Vec<String> = old.into_iter().map(|(t,)| t.unwrap_or_default()).collect();
+
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                println!("| {name} | - | - | - | - | - | 원본 읽기 실패: {e} |");
+                continue;
+            }
+        };
+        let extracted = match pdf::extract_pages(bytes).await {
+            Ok(x) => x,
+            Err(e) => {
+                println!("| {name} | - | - | - | - | - | 추출 실패(기존 페이지 유지): {e} |");
+                continue;
+            }
+        };
+        let saved = db::save_pages(pool, id, &extracted.pages).await.map_err(|e| format!("{name} 저장 실패: {e}"))?;
+
+        let (old_chars, new_chars) = (pdf::non_space_chars(&old), saved.chars);
+        let diff = if old_chars == 0 { 0.0 } else { (new_chars as f64 - old_chars as f64) / old_chars as f64 * 100.0 };
+        let (old_h, new_h) = (heading_numbers(&old), heading_numbers(&extracted.pages));
+
+        let mut notes = Vec::new();
+        if extracted.fallback {
+            notes.push("기본 추출로 대신함".to_string());
+        }
+        if saved.no_text {
+            notes.push(format!("failed: {}", pdf::NO_TEXT_ERROR));
+        }
+        let (sections,): (i64,) = sqlx::query_as("SELECT count(*) FROM msds_sections WHERE doc_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("섹션 조회 실패: {e}"))?;
+        if sections > 0 {
+            notes.push(format!("저장된 섹션 {sections}개의 줄 번호가 바뀌었을 수 있음"));
+        }
+
+        println!(
+            "| {name} | {} → {} | {old_chars} → {new_chars} ({diff:+.2}%) | {} → {} | {} → {} | {} | {} |",
+            old.len(),
+            saved.page_count,
+            old_h.len(),
+            new_h.len(),
+            backsteps(&old_h).len(),
+            backsteps(&new_h).len(),
+            seq(&new_h),
+            notes.join(", "),
+        );
+    }
+    Ok(())
 }

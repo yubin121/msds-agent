@@ -76,3 +76,51 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
     }
     Ok(())
 }
+
+pub struct SavedPages {
+    pub page_count: i32,
+    pub language: &'static str,
+    /// 공백을 뺀 글자 수 합
+    pub chars: usize,
+    /// 글자 수가 기준 미만이라 failed로 저장했는지
+    pub no_text: bool,
+}
+
+/// 문서의 msds_pages를 통째로 바꾸고 page_count·language를 갱신한다 (업로드·재추출 공용).
+/// 공백을 뺀 글자 수 합이 pdf::MIN_TEXT_CHARS 미만이면 status='failed'와 오류를 저장한다.
+/// 그 외에는 이전 실패 상태만 'uploaded'로 되돌린다.
+pub async fn save_pages(pool: &PgPool, doc_id: uuid::Uuid, pages: &[String]) -> Result<SavedPages, sqlx::Error> {
+    let language = crate::pdf::detect_language(&pages.concat());
+    let page_count = pages.len() as i32;
+    let chars = crate::pdf::non_space_chars(pages);
+    let no_text = chars < crate::pdf::MIN_TEXT_CHARS;
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM msds_pages WHERE doc_id = $1").bind(doc_id).execute(&mut *tx).await?;
+    for (i, text) in pages.iter().enumerate() {
+        // PostgreSQL TEXT는 NUL 문자를 저장할 수 없다
+        sqlx::query("INSERT INTO msds_pages (doc_id, page_no, text) VALUES ($1, $2, $3)")
+            .bind(doc_id)
+            .bind(i as i32 + 1)
+            .bind(text.replace('\0', ""))
+            .execute(&mut *tx)
+            .await?;
+    }
+    let status_sql = if no_text {
+        "UPDATE msds_documents SET language = $2, page_count = $3, status = 'failed', error = $4, \
+         updated_at = now() WHERE id = $1"
+    } else {
+        "UPDATE msds_documents SET language = $2, page_count = $3, \
+         status = CASE WHEN status = 'failed' THEN 'uploaded' ELSE status END, \
+         error = CASE WHEN status = 'failed' THEN NULL ELSE error END, \
+         updated_at = now() WHERE id = $1"
+    };
+    let mut q = sqlx::query(status_sql).bind(doc_id).bind(language).bind(page_count);
+    if no_text {
+        q = q.bind(crate::pdf::NO_TEXT_ERROR);
+    }
+    q.execute(&mut *tx).await?;
+    tx.commit().await?;
+
+    Ok(SavedPages { page_count, language, chars, no_text })
+}
