@@ -6,6 +6,7 @@ mod pdf;
 mod prompts;
 mod tool_loop;
 mod tools;
+mod validate;
 
 use std::sync::Arc;
 
@@ -18,9 +19,9 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str);
 
-    // tool-test, reextract는 LLM을 쓰지 않으므로 CLAUDE_MODEL 검사를 건너뛴다
+    // tool-test, reextract, validate-docs는 LLM을 쓰지 않으므로 CLAUDE_MODEL 검사를 건너뛴다
     let model = std::env::var("CLAUDE_MODEL").unwrap_or_default();
-    if !matches!(command, Some("tool-test" | "reextract")) && model.trim().is_empty() {
+    if !matches!(command, Some("tool-test" | "reextract" | "validate-docs")) && model.trim().is_empty() {
         tracing::error!("CLAUDE_MODEL이 비어 있습니다. .env를 확인하세요");
         std::process::exit(1);
     }
@@ -74,6 +75,14 @@ async fn main() {
             }
             return;
         }
+        // cargo run -- validate-docs : 저장된 문서(원본 PDF + msds_pages)를 업로드 검증에 다시 통과시킨다
+        Some("validate-docs") => {
+            if let Err(e) = validate_docs(&pool).await {
+                tracing::error!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         // cargo run -- reextract : data/uploads의 원본으로 모든 문서의 msds_pages를 다시 만든다
         Some("reextract") => {
             if let Err(e) = reextract(&pool).await {
@@ -83,7 +92,7 @@ async fn main() {
             return;
         }
         Some(other) => {
-            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, tool-test, reextract 또는 인자 없이 서버 실행)");
+            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, tool-test, validate-docs, reextract 또는 인자 없이 서버 실행)");
             std::process::exit(2);
         }
         None => {}
@@ -99,6 +108,7 @@ async fn main() {
         }
     };
     tracing::info!("msds-agent 시작: http://{addr} (model {model})");
+    actors::log_models();
 
     let app = api::router(api::AppState { pool });
     if let Err(e) = axum::serve(listener, app).await {
@@ -160,6 +170,55 @@ async fn tool_test(pool: sqlx::PgPool, name: &str, raw: &str) -> Result<(), Stri
         }
         Err(e) => Err(format!("툴 실행 Err: {e}")),
     }
+}
+
+/// 재업로드 없이 DB의 문서를 validate_upload에 통과시킨다. 상태는 바꾸지 않는다.
+async fn validate_docs(pool: &sqlx::PgPool) -> Result<(), String> {
+    let docs: Vec<(uuid::Uuid, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, file_name, file_path FROM msds_documents ORDER BY file_name")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("문서 조회 실패: {e}"))?;
+
+    println!("| 파일명 | 크기(MB) | 공백 제외 글자 | 서로 다른 섹션 번호 | 결과 |");
+    println!("|---|---|---|---|---|");
+    let mut failed = 0;
+    for (id, file_name, file_path) in docs {
+        let name = file_name.unwrap_or_else(|| id.to_string());
+        let path = file_path.unwrap_or_else(|| format!("data/uploads/{id}.pdf"));
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                failed += 1;
+                println!("| {name} | - | - | - | 원본 읽기 실패: {e} |");
+                continue;
+            }
+        };
+        let pages: Vec<(Option<String>,)> =
+            sqlx::query_as("SELECT text FROM msds_pages WHERE doc_id = $1 ORDER BY page_no")
+                .bind(id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| format!("페이지 조회 실패: {e}"))?;
+        let pages: Vec<String> = pages.into_iter().map(|(t,)| t.unwrap_or_default()).collect();
+        let distinct: std::collections::BTreeSet<u32> =
+            pages.iter().flat_map(|p| p.lines().filter_map(tools::headings::heading_number)).collect();
+        let result = match validate::validate_upload(&bytes, &pages) {
+            Ok(()) => "통과".to_string(),
+            Err(e) => {
+                failed += 1;
+                format!("거부: {}", e.message())
+            }
+        };
+        println!(
+            "| {name} | {:.2} | {} | {} | {result} |",
+            bytes.len() as f64 / (1024.0 * 1024.0),
+            pdf::non_space_chars(&pages),
+            distinct.len(),
+        );
+    }
+    println!("\n거부 {failed}건");
+    Ok(())
 }
 
 /// 모든 문서를 원본 PDF로 다시 추출하고, 기존 대비 비교 표를 출력한다.

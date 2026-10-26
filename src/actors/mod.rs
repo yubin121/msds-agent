@@ -32,6 +32,28 @@ impl Agent {
             Agent::Components => "components",
         }
     }
+
+    pub fn model_env(self) -> &'static str {
+        match self {
+            Agent::Extract => "CLAUDE_MODEL_EXTRACT",
+            Agent::Components => "CLAUDE_MODEL_COMPONENTS",
+        }
+    }
+}
+
+/// 에이전트별 모델 환경변수 (비어 있으면 CLAUDE_MODEL). 그림문자·번역 에이전트는 Step 8에서 액터가 된다
+pub const MODEL_ENV: &[(&str, &str)] = &[
+    ("extract", "CLAUDE_MODEL_EXTRACT"),
+    ("components", "CLAUDE_MODEL_COMPONENTS"),
+    ("hazards", "CLAUDE_MODEL_HAZARDS"),
+    ("translate", "CLAUDE_MODEL_TRANSLATE"),
+];
+
+/// 시작 로그: 에이전트별 모델 이름 (키는 출력하지 않는다)
+pub fn log_models() {
+    for (agent, key) in MODEL_ENV {
+        info!(agent, model = %crate::tool_loop::model_from_env(key), "에이전트 모델");
+    }
 }
 
 /// 에이전트 액터가 받는 메시지. R은 AgentDone을 받을 액터다.
@@ -80,14 +102,18 @@ impl JobOutcome {
 
 pub struct AgentActor<R> {
     agent: Agent,
+    model: Arc<str>,
     client: Arc<ClaudeClient>,
     pool: PgPool,
     _reply: PhantomData<fn() -> R>,
 }
 
 impl<R> AgentActor<R> {
-    pub fn new(agent: Agent, client: Arc<ClaudeClient>, pool: PgPool) -> Self {
-        Self { agent, client, pool, _reply: PhantomData }
+    /// 에이전트 자기 모델(CLAUDE_MODEL_*, 비어 있으면 CLAUDE_MODEL)로 클라이언트를 만든다
+    pub fn from_env(agent: Agent, pool: PgPool) -> Result<Self, String> {
+        let model = crate::tool_loop::model_from_env(agent.model_env());
+        let client = Arc::new(crate::tool_loop::claude_client(&model)?);
+        Ok(Self { agent, model: model.into(), client, pool, _reply: PhantomData })
     }
 }
 
@@ -103,7 +129,8 @@ where
         match msg {
             AgentMsg::Run { doc_id, reply_to } => {
                 let (agent, client, pool) = (self.agent, self.client.clone(), self.pool.clone());
-                info!(agent = agent.as_str(), %doc_id, "에이전트 작업 시작");
+                let model = self.model.clone();
+                info!(agent = agent.as_str(), model = &*model, %doc_id, "에이전트 작업 시작");
                 tokio::spawn(async move {
                     let started_at = chrono::Utc::now();
                     // 작업이 panic해도 기록과 보고는 남긴다
@@ -116,6 +143,7 @@ where
                     let run = crate::db::AgentRun {
                         doc_id,
                         agent: agent.as_str(),
+                        model: &model,
                         ok: outcome.ok,
                         error: outcome.error.as_deref(),
                         rounds: outcome.rounds,

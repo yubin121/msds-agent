@@ -1,7 +1,7 @@
 //! cargo run -- agent-test <extract|components|both> <doc_id>
 //! ActorSystem을 띄워 에이전트 액터에 Run을 보내고 AgentDone을 받아 결과를 출력한다.
 
-use std::sync::Arc;
+
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ pub async fn run(pool: PgPool, mode: &str, doc_id: &str) -> Result<(), String> {
         other => return Err(format!("알 수 없는 모드: {other} (extract, components, both)")),
     };
     let doc_id = Uuid::parse_str(doc_id.trim()).map_err(|_| format!("doc_id가 UUID 형식이 아닙니다: {doc_id}"))?;
-    let client = Arc::new(crate::tool_loop::claude_client_from_env()?);
+    crate::actors::log_models();
 
     let system = ActorSystem::new("msds");
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -44,7 +44,7 @@ pub async fn run(pool: PgPool, mode: &str, doc_id: &str) -> Result<(), String> {
     let mut dones = Vec::new();
     for &agent in agents {
         let actor = system
-            .spawn(AgentActor::<DoneCollector>::new(agent, client.clone(), pool.clone()), agent.as_str())
+            .spawn(AgentActor::<DoneCollector>::from_env(agent, pool.clone())?, agent.as_str())
             .await
             .map_err(|e| e.to_string())?;
         let started = Instant::now();

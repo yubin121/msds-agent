@@ -49,14 +49,25 @@ impl From<ClientError> for LoopError {
 
 /// .env의 CLAUDE_API_KEY, CLAUDE_MODEL로 클라이언트를 만든다. 키는 로그에 남기지 않는다.
 pub fn claude_client_from_env() -> Result<ClaudeClient, String> {
+    claude_client(&model_from_env("CLAUDE_MODEL"))
+}
+
+/// env_key(예: CLAUDE_MODEL_EXTRACT)의 모델 이름. 비어 있으면 CLAUDE_MODEL을 쓴다.
+pub fn model_from_env(env_key: &str) -> String {
+    let get = |k: &str| std::env::var(k).unwrap_or_default().trim().to_string();
+    Some(get(env_key)).filter(|m| !m.is_empty()).unwrap_or_else(|| get("CLAUDE_MODEL"))
+}
+
+/// 지정한 모델로 클라이언트를 만든다. 키는 CLAUDE_API_KEY에서 읽고 로그에 남기지 않는다.
+pub fn claude_client(model: &str) -> Result<ClaudeClient, String> {
     let api_key = std::env::var("CLAUDE_API_KEY").unwrap_or_default();
     if api_key.trim().is_empty() {
         return Err("CLAUDE_API_KEY가 비어 있습니다. .env를 확인하세요".into());
     }
-    let model = std::env::var("CLAUDE_MODEL").unwrap_or_default();
     if model.trim().is_empty() {
         return Err("CLAUDE_MODEL이 비어 있습니다. .env를 확인하세요".into());
     }
+    let model = model.trim().to_string();
     Ok(ClaudeClient::new(LlmConfig {
         api_key,
         model,

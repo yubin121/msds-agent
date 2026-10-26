@@ -18,10 +18,10 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 메시지에는 doc_id와 섹션 번호만 담는다. 결과는 각 에이전트가 저장 툴로 DB에 직접 저장한다
 - 툴: msds_find_headings, msds_save_sections, msds_get_section, msds_save_components(CAS 체크섬 검증, 틀리면 ToolOutput::error), msds_save_hazards, msds_save_translation
   - msds_doc_info {doc_id} → {file_name, page_count, language, products:[{product_no, product_name, section_nos}]}
-  - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자)}], total_found, truncated, order_ok, backsteps} (최대 200개, 판단은 모델. order_ok=false면 저장하지 말고 보고)
+  - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자), following_lines?}], total_found, truncated, order_ok, backsteps} (최대 200개, 판단은 모델. order_ok=false면 저장하지 말고 보고. 1번 섹션 후보만 아래 빈 줄 아닌 10줄(줄마다 120자)을 following_lines로 준다)
   - msds_save_sections {doc_id, sections:[{product_no=1, product_name?, section_no 1~16(표준 번호), original_no?, title, page_no, line_no}]} → {products:[{product_no, product_name, sections:[{section_no, original_no, title, chars}], missing_sections, warnings}]} (본문은 위치로 잘라 저장, 문서 단위 교체, 2만 자 넘는 섹션 경고)
   - msds_get_section {doc_id, product_no=1, section_no, offset=0} → {product_no, product_name, section_no, original_no, title, text(최대 15000자), offset, total_chars, next_offset|null}
-  - msds_save_components {doc_id, product_no=1, product_name?, components:[{product_name?, component, cas_no, percent}]} → {rows:[{component, cas_no, cas_valid}], invalid_cas, notice?} (CAS 틀려도 cas_valid=false로 저장, (doc_id, product_no) 단위 교체)
+  - msds_save_components {doc_id, product_no=1, product_name?, components:[{product_name?, component, cas_no, percent}]} → {rows:[{component, cas_no, cas_valid}], invalid_cas, notice?} (CAS 틀려도 cas_valid=false로 저장, (doc_id, product_no) 단위 교체, 제품명은 msds_sections 이름 우선)
   - msds_save_hazards {doc_id, product_no=1, h_codes?, classifications?:[{hazard_class(enum), category}], signal_word?, note?} → {status(ok|no_h_codes), pictograms:[{ghs_code, symbol_name, h_codes}], h_codes:[{h_code, sources, evidence, pictograms}], no_pictogram, unknown_codes, unknown_classifications, suppressed_ghs07, warnings} ((doc_id, product_no) 단위 교체)
   - msds_save_translation {doc_id, product_no=1, section_no, chunk_no=0, title_ko, text_ko} → {chars, saved_chunks} ((doc_id, product_no, section_no, chunk_no) 단위 교체)
   - 입력 오류는 ToolOutput::error("오류: 이유"), DB 장애만 Err(ToolError::ExecutionFailed)
@@ -67,3 +67,26 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 # CAS 원문 원칙
 - 성분명, CAS, 함유량은 원문 표기 그대로 저장한다. 모델이 자기 지식으로 CAS를 바꾸거나 채우지 않는다
 - invalid_cas가 나오면 원문을 다시 읽어, 잘못 읽은 것만 고친다. 원문 자체가 틀리면(엑셀이 날짜로 바꾼 1964-02-08 등) cas_valid=false로 두고 최종 답에 적는다
+
+# 제품명 기준
+- 제품명은 msds_sections.product_name이 기준이다. 추출 에이전트가 1번 섹션 후보의 following_lines에서 찾는다(Product name, Trade name, 제품명 등. 제품 번호는 제품명이 아님). 못 찾으면 비워 둔다(추측 금지). 단일 제품 문서도 넣는다
+- msds_save_components는 msds_sections에 이름이 있으면 그 이름을 복사하고, 없을 때만 입력 값을 쓴다. 성분 에이전트는 제품명을 새로 정하지 않는다
+
+# 다중 CAS와 빈 CAS
+- 원문 한 칸에 CAS가 여러 개면 행을 나누지 않는다. cas_no에 쉼표·세미콜론으로 받아 각각 검사하고 "64742-54-7, 64742-65-0"처럼 한 문자열로 저장한다
+- cas_valid는 모두 맞을 때만 true, 하나라도 틀리면 false. invalid_cas에는 틀린 번호만 적는다
+- 빈 값 목록(대소문자·공백 무시): "", "-", "N/A", "없음", "해당없음", "해당 없음", "자료없음", "None", "Not available", "Not applicable", "N.A.", "NA" → cas_no, cas_valid 모두 NULL
+- 비공개 문구(Proprietary, Trade secret, 영업비밀 등)가 있으면 칸 전체를 "비공개"로 보고 쉼표로 나누지 않는다
+
+# 에이전트별 모델
+- .env의 CLAUDE_MODEL_EXTRACT, CLAUDE_MODEL_COMPONENTS, CLAUDE_MODEL_HAZARDS, CLAUDE_MODEL_TRANSLATE. 비어 있으면 CLAUDE_MODEL
+- AgentActor::from_env가 에이전트마다 자기 모델로 ClaudeClient를 만든다. 시작 로그에 에이전트별 모델 이름을 출력한다(키는 출력 금지)
+- msds_agent_runs.model에 실행마다 모델을 저장한다
+
+# 업로드 검증 (재시도 대신 입력 검증, 근거: 10/26 소장님 피드백)
+- 순서: %PDF- 시그니처 → 크기 20MB 이하 → 공백 제외 텍스트 200자 이상 → 제목 후보의 서로 다른 섹션 번호 8개 이상
+- 실패하면 문서 행을 status 'failed', error에 이유로 남기고 400 + {"error": 메시지}. PDF가 아니면 파일을 디스크에 저장하지 않는다
+  - 메시지: "PDF 파일이 아닙니다", "파일이 20MB를 넘습니다(..MB)", "텍스트가 없는 PDF입니다(스캔본일 수 있음)", "MSDS 문서가 아닌 것으로 보입니다"
+- 검사는 src/validate.rs의 순수 함수(validate_file, validate_text, validate_upload)로만 한다. 다른 런타임(Cloudflare Worker 등)에 같은 규칙으로 옮길 수 있게 DB·IO를 넣지 않는다
+- 추출 에이전트의 사전 검사는 안전장치로 남긴다(기준 MIN_DISTINCT_HEADINGS는 headings.rs 공용)
+- 저장된 문서 재검사: cargo run -- validate-docs (상태는 바꾸지 않음)

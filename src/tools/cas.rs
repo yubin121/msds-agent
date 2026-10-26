@@ -2,7 +2,7 @@
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CasCheck {
-    /// 빈 값, "-", "N/A" → cas_no, cas_valid 모두 NULL
+    /// 빈 값, "-", "N/A", "없음" 등 → cas_no, cas_valid 모두 NULL
     Missing,
     /// 영업비밀 등 → cas_no "비공개", cas_valid NULL
     Confidential,
@@ -12,19 +12,11 @@ pub enum CasCheck {
     Invalid { cleaned: String, reason: String },
 }
 
-impl CasCheck {
-    /// DB에 저장할 (cas_no, cas_valid)
-    pub fn db_values(&self) -> (Option<String>, Option<bool>) {
-        match self {
-            CasCheck::Missing => (None, None),
-            CasCheck::Confidential => (Some("비공개".into()), None),
-            CasCheck::Valid(c) => (Some(c.clone()), Some(true)),
-            CasCheck::Invalid { cleaned, .. } => (Some(cleaned.clone()), Some(false)),
-        }
-    }
-}
-
 const CONFIDENTIAL: &[&str] = &["proprietary", "trade secret", "confidential", "비공개", "영업비밀"];
+/// CAS가 없다는 뜻의 값. 소문자로 바꾸고 공백을 뺀 뒤 비교한다 ("해당 없음" = "해당없음")
+const MISSING: &[&str] = &[
+    "", "-", "n/a", "없음", "해당없음", "자료없음", "none", "notavailable", "notapplicable", "n.a.", "na",
+];
 const DASHES: &[char] = &['\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}', '\u{FE63}', '\u{FF0D}'];
 
 /// 공백 제거, 여러 대시를 '-'로 통일
@@ -42,7 +34,7 @@ pub fn check_cas(raw: Option<&str>) -> CasCheck {
         return CasCheck::Confidential;
     }
     let cleaned = clean_cas(raw);
-    if cleaned.is_empty() || cleaned == "-" || cleaned.eq_ignore_ascii_case("n/a") {
+    if MISSING.contains(&cleaned.to_lowercase().as_str()) {
         return CasCheck::Missing;
     }
 
@@ -69,6 +61,57 @@ pub fn check_cas(raw: Option<&str>) -> CasCheck {
         };
     }
     CasCheck::Valid(cleaned)
+}
+
+/// 한 칸에 적힌 CAS(쉼표·세미콜론으로 여러 개 가능)를 검사한 결과
+#[derive(Debug, Clone, PartialEq)]
+pub struct CasField {
+    /// "64742-54-7, 64742-65-0"처럼 정리한 값을 ", "로 이은 것
+    pub cas_no: Option<String>,
+    /// 번호가 하나라도 틀리면 false, 모두 맞으면 true, 검사할 번호가 없으면(빈 값·비공개) NULL
+    pub cas_valid: Option<bool>,
+    /// 틀린 번호만 (정리한 값, 이유)
+    pub invalid: Vec<(String, String)>,
+}
+
+pub fn check_cas_field(raw: Option<&str>) -> CasField {
+    // "Trade secret, see note"처럼 비공개 문구 안의 쉼표로 나누지 않는다
+    if check_cas(raw) == CasCheck::Confidential {
+        return CasField { cas_no: Some("비공개".into()), cas_valid: None, invalid: vec![] };
+    }
+    let checks: Vec<CasCheck> = raw
+        .unwrap_or("")
+        .split([',', ';'])
+        .map(|part| check_cas(Some(part)))
+        .filter(|c| *c != CasCheck::Missing)
+        .collect();
+
+    let mut values = Vec::new();
+    let mut invalid = Vec::new();
+    let mut any_valid = false;
+    for c in &checks {
+        match c {
+            CasCheck::Missing => {}
+            CasCheck::Confidential => values.push("비공개".to_string()),
+            CasCheck::Valid(v) => {
+                any_valid = true;
+                values.push(v.clone());
+            }
+            CasCheck::Invalid { cleaned, reason } => {
+                invalid.push((cleaned.clone(), reason.clone()));
+                values.push(cleaned.clone());
+            }
+        }
+    }
+    values.dedup();
+    let cas_valid = if !invalid.is_empty() {
+        Some(false)
+    } else if any_valid {
+        Some(true)
+    } else {
+        None
+    };
+    CasField { cas_no: (!values.is_empty()).then(|| values.join(", ")), cas_valid, invalid }
 }
 
 #[cfg(test)]
@@ -109,7 +152,58 @@ mod tests {
         for c in ["Proprietary", "TRADE SECRET", "Confidential business information", "비공개", "영업비밀"] {
             assert_eq!(check_cas(Some(c)), CasCheck::Confidential, "{c}");
         }
-        assert_eq!(CasCheck::Confidential.db_values(), (Some("비공개".into()), None));
-        assert_eq!(CasCheck::Missing.db_values(), (None, None));
+    }
+
+    #[test]
+    fn missing_words() {
+        for c in [
+            "없음", "해당없음", "해당 없음", " 자료 없음 ", "None", "NONE", "Not available", "not  applicable",
+            "N.A.", "n.a.", "NA", "na",
+        ] {
+            assert_eq!(check_cas(Some(c)), CasCheck::Missing, "{c}");
+            assert_eq!(check_cas_field(Some(c)), CasField { cas_no: None, cas_valid: None, invalid: vec![] }, "{c}");
+        }
+        // 엑셀이 날짜로 바꾼 값은 빈 값이 아니라 오류다
+        assert!(matches!(check_cas(Some("1964-02-08")), CasCheck::Invalid { .. }));
+    }
+
+    #[test]
+    fn several_cas_in_one_cell() {
+        let f = check_cas_field(Some("64742-54-7, 64742-65-0"));
+        assert_eq!(f.cas_no.as_deref(), Some("64742-54-7, 64742-65-0"));
+        assert_eq!(f.cas_valid, Some(true));
+        assert!(f.invalid.is_empty());
+
+        // 세미콜론, 공백 없음, 빈 조각
+        let f = check_cas_field(Some("7732-18-5;64-17-5;"));
+        assert_eq!(f.cas_no.as_deref(), Some("7732-18-5, 64-17-5"));
+        assert_eq!(f.cas_valid, Some(true));
+
+        // 하나라도 틀리면 false, invalid에는 틀린 것만
+        let f = check_cas_field(Some("7732-18-5, 7732-18-4"));
+        assert_eq!(f.cas_no.as_deref(), Some("7732-18-5, 7732-18-4"));
+        assert_eq!(f.cas_valid, Some(false));
+        assert_eq!(f.invalid.len(), 1);
+        assert_eq!(f.invalid[0].0, "7732-18-4");
+        assert!(f.invalid[0].1.contains("체크섬"));
+    }
+
+    #[test]
+    fn single_cas_field_matches_check_cas() {
+        assert_eq!(
+            check_cas_field(Some("7732-18-5")),
+            CasField { cas_no: Some("7732-18-5".into()), cas_valid: Some(true), invalid: vec![] }
+        );
+        let f = check_cas_field(Some("1964-02-08"));
+        assert_eq!((f.cas_no.as_deref(), f.cas_valid), (Some("1964-02-08"), Some(false)));
+        assert_eq!(
+            check_cas_field(Some("Proprietary")),
+            CasField { cas_no: Some("비공개".into()), cas_valid: None, invalid: vec![] }
+        );
+        assert_eq!(
+            check_cas_field(Some("Trade secret, see section 16")),
+            CasField { cas_no: Some("비공개".into()), cas_valid: None, invalid: vec![] }
+        );
+        assert_eq!(check_cas_field(None), CasField { cas_no: None, cas_valid: None, invalid: vec![] });
     }
 }

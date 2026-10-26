@@ -151,8 +151,9 @@ impl Tool for SaveSectionsTool {
                           - section_no는 문서에 찍힌 번호가 아니라 제목의 뜻에 따른 GHS 표준 번호(1~16)다. \
                           예: 옛 양식의 '2. Composition'은 section_no 3, original_no 2이고 '3. Hazards'는 section_no 2, \
                           original_no 3이다. 번호가 표준과 같으면 original_no는 생략한다.\n\
-                          - 한 PDF에 제품이 여러 개면 product_no를 1부터 위치 순서대로 붙이고 product_name을 적는다. \
-                          단일 제품이면 생략한다(기본 1). 같은 제품 안에서 section_no는 중복될 수 없다.\n\
+                          - 한 PDF에 제품이 여러 개면 product_no를 1부터 위치 순서대로 붙인다. 단일 제품이면 product_no는 \
+                          생략한다(기본 1). product_name은 단일 제품이어도 그 제품 1번 섹션의 제품명을 적는다(모르면 생략). \
+                          같은 제품 안에서 section_no는 중복될 수 없다.\n\
                           다시 호출하면 이 문서의 섹션을 모두 지우고 새로 저장한다."
                 .into(),
             input_schema: json!({

@@ -17,6 +17,9 @@ static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
+/// 제목 후보의 서로 다른 번호가 이보다 적으면 MSDS가 아닌 것으로 본다 (업로드 검증·추출 사전 검사 공용)
+pub const MIN_DISTINCT_HEADINGS: usize = 8;
+
 /// 줄이 섹션 제목처럼 보이면 섹션 번호(1~16)를 돌려준다.
 pub fn heading_number(line: &str) -> Option<u32> {
     PATTERNS.iter().find_map(|re| {

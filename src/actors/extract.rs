@@ -12,11 +12,9 @@ use uuid::Uuid;
 use super::JobOutcome;
 use crate::prompts::{EXTRACT_MAX_TOKENS, EXTRACT_SYSTEM};
 use crate::tool_loop::run_tool_loop;
-use crate::tools::headings::{backsteps, heading_number};
+use crate::tools::headings::{backsteps, heading_number, MIN_DISTINCT_HEADINGS};
 use crate::tools::{FindHeadingsTool, SaveSectionsTool};
 
-/// 제목 후보의 서로 다른 번호가 이보다 적으면 MSDS가 아닌 것으로 본다
-pub const MIN_DISTINCT_HEADINGS: usize = 8;
 pub const NOT_MSDS_ERROR: &str = "MSDS 문서가 아닌 것으로 보입니다(섹션 제목 부족)";
 pub const SHUFFLED_ERROR: &str = "섹션 순서가 뒤섞인 문서입니다";
 

@@ -96,6 +96,8 @@ const MIGRATIONS: &[&str] = &[
         finished_at TIMESTAMPTZ
     )",
     "CREATE INDEX IF NOT EXISTS msds_agent_runs_doc_idx ON msds_agent_runs (doc_id)",
+    // 에이전트별 모델 (CLAUDE_MODEL_*)
+    "ALTER TABLE msds_agent_runs ADD COLUMN IF NOT EXISTS model TEXT",
 ];
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -156,6 +158,7 @@ pub async fn save_pages(pool: &PgPool, doc_id: uuid::Uuid, pages: &[String]) -> 
 pub struct AgentRun<'a> {
     pub doc_id: uuid::Uuid,
     pub agent: &'a str,
+    pub model: &'a str,
     pub ok: bool,
     pub error: Option<&'a str>,
     pub rounds: u32,
@@ -168,10 +171,13 @@ pub struct AgentRun<'a> {
 /// 에이전트 실행 한 번을 msds_agent_runs에 기록한다.
 pub async fn save_agent_run(pool: &PgPool, run: &AgentRun<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO msds_agent_runs          (doc_id, agent, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO msds_agent_runs \
+         (doc_id, agent, model, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(run.doc_id)
     .bind(run.agent)
+    .bind(run.model)
     .bind(run.ok)
     .bind(run.error)
     .bind(run.rounds as i32)
@@ -181,5 +187,15 @@ pub async fn save_agent_run(pool: &PgPool, run: &AgentRun<'_>) -> Result<(), sql
     .bind(run.finished_at)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// 문서를 status 'failed'로 바꾸고 이유를 남긴다.
+pub async fn mark_failed(pool: &PgPool, doc_id: uuid::Uuid, error: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE msds_documents SET status = 'failed', error = $2, updated_at = now() WHERE id = $1")
+        .bind(doc_id)
+        .bind(error)
+        .execute(pool)
+        .await?;
     Ok(())
 }

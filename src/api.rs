@@ -13,10 +13,10 @@ use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+use crate::validate::{self, MAX_UPLOAD_BYTES};
 use crate::{db, pdf};
 
 const UPLOAD_DIR: &str = "data/uploads";
-const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const PREVIEW_CHARS: usize = 300;
 
 #[derive(Clone)]
@@ -74,17 +74,25 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
         break;
     }
     let (file_name, bytes) = file.ok_or_else(|| bad_request("\"file\" 필드가 없습니다"))?;
-    if !bytes.starts_with(b"%PDF-") {
-        return Err(bad_request("PDF 파일이 아닙니다 (내용이 %PDF-로 시작하지 않음)"));
+
+    // 문서 행을 먼저 만들어 검증 실패도 status 'failed'와 이유로 남긴다
+    sqlx::query("INSERT INTO msds_documents (id, file_name) VALUES ($1, $2)")
+        .bind(doc_id)
+        .bind(&file_name)
+        .execute(&st.pool)
+        .await
+        .map_err(internal)?;
+
+    // 검증 1~2: 시그니처, 크기 (PDF가 아니면 디스크에 저장하지 않는다)
+    if let Err(e) = validate::validate_file(&bytes) {
+        return Err(reject(&st.pool, doc_id, &e.message()).await);
     }
 
     let file_path = format!("{UPLOAD_DIR}/{doc_id}.pdf");
     tokio::fs::create_dir_all(UPLOAD_DIR).await.map_err(internal)?;
     tokio::fs::write(&file_path, &bytes).await.map_err(internal)?;
-
-    sqlx::query("INSERT INTO msds_documents (id, file_name, file_path) VALUES ($1, $2, $3)")
+    sqlx::query("UPDATE msds_documents SET file_path = $2 WHERE id = $1")
         .bind(doc_id)
-        .bind(&file_name)
         .bind(&file_path)
         .execute(&st.pool)
         .await
@@ -92,23 +100,15 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
 
     let extracted = match pdf::extract_pages(bytes).await {
         Ok(x) => x,
-        Err(e) => {
-            tracing::warn!(%doc_id, "{e}");
-            sqlx::query("UPDATE msds_documents SET status = 'failed', error = $2, updated_at = now() WHERE id = $1")
-                .bind(doc_id)
-                .bind(&e)
-                .execute(&st.pool)
-                .await
-                .map_err(internal)?;
-            return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, e));
-        }
+        Err(e) => return Err(reject(&st.pool, doc_id, &e).await),
     };
-
     let saved = db::save_pages(&st.pool, doc_id, &extracted.pages).await.map_err(internal)?;
     let (page_count, language) = (saved.page_count, saved.language);
-    if saved.no_text {
-        tracing::warn!(%doc_id, chars = saved.chars, "{}", pdf::NO_TEXT_ERROR);
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, pdf::NO_TEXT_ERROR.into()));
+
+    // 검증 3~4: 텍스트 글자 수, MSDS 여부
+    if let Err(e) = validate::validate_text(&extracted.pages) {
+        tracing::warn!(%doc_id, chars = saved.chars, ?e, "업로드 검증 실패");
+        return Err(reject(&st.pool, doc_id, &e.message()).await);
     }
 
     tracing::info!(%doc_id, page_count, language, fallback = extracted.fallback, "업로드 완료");
@@ -118,6 +118,15 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
         "page_count": page_count,
         "language": language,
     })))
+}
+
+/// 업로드 검증 실패: 문서를 failed로 남기고 400으로 응답한다
+async fn reject(pool: &PgPool, doc_id: Uuid, msg: &str) -> ApiError {
+    tracing::warn!(%doc_id, "업로드 거부: {msg}");
+    if let Err(e) = db::mark_failed(pool, doc_id, msg).await {
+        return internal(e);
+    }
+    bad_request(msg)
 }
 
 /// 파일 이름: file_name() → Content-Disposition 원본 바이트(UTF-8 → CP949) → upload-{uuid}.pdf

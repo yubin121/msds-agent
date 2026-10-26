@@ -16,8 +16,10 @@ pub const EXTRACT_SYSTEM: &str = "\
 
 ## 제품
 - 1번 섹션(제품 및 회사 정보)이 다시 나오면 새 제품이다. product_no를 위치 순서대로 1부터 붙인다.
-- product_name은 그 제품 1번 섹션에 적힌 제품명이다. 후보 줄에서 알 수 없으면 생략해도 된다.
-- 단일 제품 문서는 product_no 1이다.
+- product_name은 그 제품 1번 섹션에 적힌 제품명이다. 1번 섹션 후보의 following_lines에서
+  Product name, Trade name, Product identifier, 제품명, 상품명 등에 적힌 값을 찾아 넣는다.
+  제품 번호(Product number, Product code)는 제품명이 아니다. 찾지 못하면 비워 둔다(추측 금지).
+- 단일 제품 문서는 product_no 1이다. 단일 제품이어도 product_name은 넣는다.
 
 ## 표준 번호
 section_no는 문서에 찍힌 번호가 아니라 제목의 뜻에 따른 GHS 표준 번호다.
@@ -60,9 +62,12 @@ pub const COMPONENTS_SYSTEM: &str = "\
 - 표가 줄 단위로 흩어져 있을 수 있다. 성분명·CAS·함유량이 같은 행인지 위치와 순서로 맞춘다.
 
 ## 저장
-- 제품마다 따로 msds_save_components를 호출하고 product_no와 product_name을 적는다.
+- 제품마다 따로 msds_save_components를 호출하고 product_no를 적는다.
+  제품명은 추출 단계에서 정해졌으므로 새로 정하지 않는다(product_name은 보내지 않는다).
 - 성분명, CAS, 함유량은 원문 표기 그대로 보낸다(함유량 '10-30', '<1', '30~60' 등). 단위나 표기를 바꾸지 않는다.
-- Proprietary, Trade secret, 영업비밀 등은 원문대로 보낸다. CAS가 비어 있거나 '-'면 원문대로 보낸다.
+- 원문 한 칸에 CAS가 여러 개면 행을 나누지 말고 한 행의 cas_no에 쉼표로 이어 넣는다
+  (예: '64742-54-7, 64742-65-0'). 함유량이 중복되지 않게 한다.
+- Proprietary, Trade secret, 영업비밀 등은 원문대로 보낸다. CAS가 비어 있거나 '-', '없음' 등이면 원문대로 보낸다.
 - 성분이 아닌 행(표 머리글, 각주, 혼합물 전체 설명)은 넣지 않는다.
 
 ## CAS 검증
