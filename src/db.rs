@@ -82,6 +82,20 @@ const MIGRATIONS: &[&str] = &[
     "DROP INDEX IF EXISTS msds_translations_chunk_uq",
     "CREATE UNIQUE INDEX IF NOT EXISTS msds_translations_product_chunk_uq \
      ON msds_translations (doc_id, product_no, section_no, chunk_no)",
+    // Step 7: 에이전트 실행 기록 (실행마다 한 행, 토큰·비용 집계용)
+    "CREATE TABLE IF NOT EXISTS msds_agent_runs (
+        id BIGSERIAL PRIMARY KEY,
+        doc_id UUID,
+        agent TEXT NOT NULL,
+        ok BOOLEAN NOT NULL,
+        error TEXT,
+        rounds INT,
+        input_tokens INT,
+        output_tokens INT,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ
+    )",
+    "CREATE INDEX IF NOT EXISTS msds_agent_runs_doc_idx ON msds_agent_runs (doc_id)",
 ];
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -137,4 +151,35 @@ pub async fn save_pages(pool: &PgPool, doc_id: uuid::Uuid, pages: &[String]) -> 
     tx.commit().await?;
 
     Ok(SavedPages { page_count, language, chars, no_text })
+}
+
+pub struct AgentRun<'a> {
+    pub doc_id: uuid::Uuid,
+    pub agent: &'a str,
+    pub ok: bool,
+    pub error: Option<&'a str>,
+    pub rounds: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 에이전트 실행 한 번을 msds_agent_runs에 기록한다.
+pub async fn save_agent_run(pool: &PgPool, run: &AgentRun<'_>) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO msds_agent_runs          (doc_id, agent, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(run.doc_id)
+    .bind(run.agent)
+    .bind(run.ok)
+    .bind(run.error)
+    .bind(run.rounds as i32)
+    .bind(run.input_tokens as i32)
+    .bind(run.output_tokens as i32)
+    .bind(run.started_at)
+    .bind(run.finished_at)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

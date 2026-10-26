@@ -9,7 +9,9 @@ use pekko_agent_tools::ToolRegistry;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const MAX_TOOL_ROUNDS: u32 = 10;
+/// 툴 루프 최대 라운드. MSDS_MAX_ROUNDS로 바꿀 수 있다(1~20).
+const DEFAULT_MAX_ROUNDS: u32 = 10;
+const MAX_ROUNDS_RANGE: std::ops::RangeInclusive<u32> = 1..=20;
 const MAX_TOOL_RESULT_BYTES: usize = 30_000;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUND_LIMIT_NOTICE: &str =
@@ -64,6 +66,24 @@ pub fn claude_client_from_env() -> Result<ClaudeClient, String> {
     }))
 }
 
+/// MSDS_MAX_ROUNDS 값을 해석한다. 없거나 숫자가 아니면 기본 10, 범위를 벗어나면 1~20으로 맞춘다.
+fn parse_max_rounds(raw: Option<&str>) -> u32 {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => DEFAULT_MAX_ROUNDS,
+        Some(s) => match s.parse::<i64>() {
+            Ok(n) => n.clamp(*MAX_ROUNDS_RANGE.start() as i64, *MAX_ROUNDS_RANGE.end() as i64) as u32,
+            Err(_) => {
+                warn!(value = s, "MSDS_MAX_ROUNDS가 숫자가 아닙니다. 기본값 {DEFAULT_MAX_ROUNDS}을 씁니다");
+                DEFAULT_MAX_ROUNDS
+            }
+        },
+    }
+}
+
+pub fn max_rounds() -> u32 {
+    parse_max_rounds(std::env::var("MSDS_MAX_ROUNDS").ok().as_deref())
+}
+
 pub async fn run_tool_loop(
     client: &ClaudeClient,
     registry: &mut ToolRegistry,
@@ -72,6 +92,7 @@ pub async fn run_tool_loop(
     max_tokens: u32,
 ) -> Result<LoopResult, LoopError> {
     let tools = to_claude_tools(&registry.list_tools());
+    let max_rounds = max_rounds();
     let ctx = ToolContext {
         tenant_id: "local".into(),
         user_id: "msds-agent".into(),
@@ -92,7 +113,7 @@ pub async fn run_tool_loop(
         output_tokens: 0,
     };
 
-    while result.rounds < MAX_TOOL_ROUNDS {
+    while result.rounds < max_rounds {
         result.rounds += 1;
         let resp = call(client, system_prompt, &messages, &tools, max_tokens, &mut result).await?;
         let tool_uses = tool_uses(&resp);
@@ -121,7 +142,7 @@ pub async fn run_tool_loop(
     // 한도 소진: 마지막 user 메시지(tool_result 모음) 뒤에 안내를 붙여 한 번 더 호출한다.
     // 대화에 tool_use/tool_result 블록이 있으면 API가 tools 정의를 요구하므로 tools는 그대로 보내고
     // 안내 문구로 툴 사용을 막는다.
-    warn!(rounds = MAX_TOOL_ROUNDS, "도구 호출 한도 도달, 최종 답 요청");
+    warn!(rounds = max_rounds, "도구 호출 한도 도달, 툴 사용 금지 안내를 붙여 마무리 호출");
     if let Some(last) = messages.last_mut() {
         last.content.push(ContentBlock::Text { text: ROUND_LIMIT_NOTICE.into() });
     }
@@ -281,6 +302,18 @@ mod tests {
             assert!(kept.len() <= max);
             assert!(s.starts_with(kept));
         }
+    }
+
+    #[test]
+    fn max_rounds_env() {
+        assert_eq!(parse_max_rounds(None), 10);
+        assert_eq!(parse_max_rounds(Some("")), 10);
+        assert_eq!(parse_max_rounds(Some("abc")), 10);
+        assert_eq!(parse_max_rounds(Some(" 1 ")), 1);
+        assert_eq!(parse_max_rounds(Some("20")), 20);
+        assert_eq!(parse_max_rounds(Some("0")), 1);
+        assert_eq!(parse_max_rounds(Some("-3")), 1);
+        assert_eq!(parse_max_rounds(Some("99")), 20);
     }
 
     #[test]

@@ -1,6 +1,9 @@
+mod actors;
+mod agent_test;
 mod api;
 mod db;
 mod pdf;
+mod prompts;
 mod tool_loop;
 mod tools;
 
@@ -47,6 +50,18 @@ async fn main() {
             }
             return;
         }
+        // cargo run -- agent-test <extract|components|both> <doc_id> : 에이전트 액터를 실행하고 결과 출력
+        Some("agent-test") => {
+            let (Some(mode), Some(doc_id)) = (args.get(1), args.get(2)) else {
+                tracing::error!("사용법: cargo run -- agent-test <extract|components|both> <doc_id>");
+                std::process::exit(2);
+            };
+            if let Err(e) = agent_test::run(pool, mode, doc_id).await {
+                tracing::error!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         // cargo run -- tool-test <툴이름> '<JSON>' | @파일.json : LLM 없이 툴 하나만 실행
         Some("tool-test") => {
             let (Some(name), Some(raw)) = (args.get(1), args.get(2)) else {
@@ -68,7 +83,7 @@ async fn main() {
             return;
         }
         Some(other) => {
-            tracing::error!("알 수 없는 명령: {other} (loop-test, tool-test, reextract 또는 인자 없이 서버 실행)");
+            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, tool-test, reextract 또는 인자 없이 서버 실행)");
             std::process::exit(2);
         }
         None => {}
