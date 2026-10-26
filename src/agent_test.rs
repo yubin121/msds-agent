@@ -1,4 +1,4 @@
-//! cargo run -- agent-test <extract|components|both> <doc_id>
+//! cargo run -- agent-test <extract|components|both|hazards|translate> <doc_id>
 //! ActorSystem을 띄워 에이전트 액터에 Run을 보내고 AgentDone을 받아 결과를 출력한다.
 
 
@@ -218,13 +218,33 @@ async fn print_translations(pool: &PgPool, doc_id: Uuid) -> Result<(), String> {
     .await
     .map_err(|e| format!("번역 조회 실패: {e}"))?;
 
-    let targets = crate::actors::translate::parse_sections(std::env::var("MSDS_TRANSLATE_SECTIONS").ok().as_deref())?;
+    let targets = crate::actors::translate::Targets::from_env()?;
     let check = crate::actors::translate::check_saved(pool, doc_id, &targets).await?;
-    println!("\n## 번역 (대상 섹션 {:?})", targets);
-    println!("| 제품 | 섹션 | 원문 글자 | 번역 글자 | 조각 |");
-    println!("|---|---|---|---|---|");
-    for (p, s, src, ko, chunks) in rows.iter().filter(|r| targets.contains(&r.1)) {
-        println!("| {p} | {s} | {src} | {ko} | {chunks} |");
+    println!(
+        "\n## 번역 (대상 섹션 {:?}, 제품 {})",
+        targets.sections,
+        targets.products.as_ref().map(|p| format!("{p:?}")).unwrap_or_else(|| "전부".into())
+    );
+    for (p, lines) in &check.furniture {
+        println!("제품 {p} 페이지 머리말·꼬리말 {}줄 (번역 입력에서 뺌)", lines.len());
+        for l in lines {
+            println!("  - {l}");
+        }
+    }
+    println!("| 제품 | 섹션 | 원문 글자 | 번역 글자 | 조각 | 라틴 문자 비율 |");
+    println!("|---|---|---|---|---|---|");
+    for (p, s, src, ko, chunks) in rows.iter().filter(|r| targets.contains(r.0, r.1)) {
+        let latin = check
+            .latin
+            .iter()
+            .find(|l| l.0 == *p && l.1 == *s)
+            .map(|l| format!("{:.1}%", l.2 * 100.0))
+            .unwrap_or_else(|| "-".into());
+        println!("| {p} | {s} | {src} | {ko} | {chunks} | {latin} |");
+    }
+    if !check.latin.is_empty() {
+        let avg = check.latin.iter().map(|l| l.2).sum::<f64>() / check.latin.len() as f64;
+        println!("섹션 평균 라틴 문자 비율: {:.1}%", avg * 100.0);
     }
     println!("빠진 섹션: {}", if check.missing.is_empty() { "없음".into() } else { check.missing.join(", ") });
     println!("사후 검사 경고 {}건", check.warnings.len());

@@ -172,6 +172,42 @@ pub async fn run_tool_loop(
     Ok(result)
 }
 
+/// 툴 없이 한 번만 호출한 결과
+#[derive(Debug, Clone)]
+pub struct SingleCall {
+    pub text: String,
+    pub stop_reason: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// 툴 없이 한 번 호출한다(판단이 필요 없는 작업용. 예: 번역).
+pub async fn call_once(
+    client: &ClaudeClient,
+    system_prompt: &str,
+    user_message: String,
+    max_tokens: u32,
+) -> Result<SingleCall, ClientError> {
+    let req = LlmRequest {
+        system_prompt: system_prompt.to_string(),
+        messages: vec![ClaudeMessage { role: "user".into(), content: vec![ContentBlock::Text { text: user_message }] }],
+        tools: Vec::new(),
+        max_tokens,
+        temperature: None,
+        cacheable: false,
+    };
+    let resp = client.send_message(&req).await?;
+    if resp.stop_reason == "max_tokens" {
+        warn!(max_tokens, "max_tokens에 도달해 응답이 잘렸을 수 있습니다");
+    }
+    Ok(SingleCall {
+        text: collect_text(&resp.content),
+        stop_reason: resp.stop_reason,
+        input_tokens: resp.usage.input_tokens,
+        output_tokens: resp.usage.output_tokens,
+    })
+}
+
 async fn call(
     client: &ClaudeClient,
     system_prompt: &str,
