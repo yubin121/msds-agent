@@ -6,7 +6,10 @@
 
 pub mod components;
 pub mod extract;
+pub mod hazards;
+pub mod translate;
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -23,36 +26,85 @@ use crate::tool_loop::LoopResult;
 pub enum Agent {
     Extract,
     Components,
+    Hazards,
+    Translate,
 }
 
 impl Agent {
+    pub const ALL: [Agent; 4] = [Agent::Extract, Agent::Components, Agent::Hazards, Agent::Translate];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Agent::Extract => "extract",
             Agent::Components => "components",
+            Agent::Hazards => "hazards",
+            Agent::Translate => "translate",
         }
     }
 
+    /// 에이전트별 모델 환경변수 (비어 있으면 CLAUDE_MODEL)
     pub fn model_env(self) -> &'static str {
         match self {
             Agent::Extract => "CLAUDE_MODEL_EXTRACT",
             Agent::Components => "CLAUDE_MODEL_COMPONENTS",
+            Agent::Hazards => "CLAUDE_MODEL_HAZARDS",
+            Agent::Translate => "CLAUDE_MODEL_TRANSLATE",
         }
     }
 }
 
-/// 에이전트별 모델 환경변수 (비어 있으면 CLAUDE_MODEL). 그림문자·번역 에이전트는 Step 8에서 액터가 된다
-pub const MODEL_ENV: &[(&str, &str)] = &[
-    ("extract", "CLAUDE_MODEL_EXTRACT"),
-    ("components", "CLAUDE_MODEL_COMPONENTS"),
-    ("hazards", "CLAUDE_MODEL_HAZARDS"),
-    ("translate", "CLAUDE_MODEL_TRANSLATE"),
-];
-
 /// 시작 로그: 에이전트별 모델 이름 (키는 출력하지 않는다)
 pub fn log_models() {
-    for (agent, key) in MODEL_ENV {
-        info!(agent, model = %crate::tool_loop::model_from_env(key), "에이전트 모델");
+    for agent in Agent::ALL {
+        info!(agent = agent.as_str(), model = %crate::tool_loop::model_from_env(agent.model_env()), "에이전트 모델");
+    }
+}
+
+pub const NO_SECTIONS_ERROR: &str = "추출 결과 없음";
+
+/// msds_sections에 저장된 제품 목록 (product_no, product_name)
+pub async fn load_products(pool: &PgPool, doc_id: Uuid) -> Result<Vec<(i32, Option<String>)>, String> {
+    sqlx::query_as(
+        "SELECT product_no, max(product_name) FROM msds_sections WHERE doc_id = $1          GROUP BY product_no ORDER BY product_no",
+    )
+    .bind(doc_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("섹션 조회 실패: {e}"))
+}
+
+/// 사용자 메시지에 넣을 제품 목록
+pub fn product_list(products: &[(i32, Option<String>)]) -> String {
+    products
+        .iter()
+        .map(|(no, name)| format!("- product_no {no}: {}", name.as_deref().unwrap_or("(제품명 없음)")))
+        .collect::<Vec<_>>()
+        .join("
+")
+}
+
+/// 결과 테이블(msds_components, msds_hazards)의 제품별 행 수
+pub async fn rows_per_product(pool: &PgPool, table: &str, doc_id: Uuid) -> Result<BTreeMap<i32, i64>, String> {
+    let rows: Vec<(i32, i64)> =
+        sqlx::query_as(&format!("SELECT product_no, count(*) FROM {table} WHERE doc_id = $1 GROUP BY product_no"))
+            .bind(doc_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("{table} 조회 실패: {e}"))?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 성공 판정 공용: 제품마다 행이 1개 이상이어야 한다. what은 오류 메시지의 주어("성분이")
+pub fn check_rows_per_product(products: &[i32], counts: &BTreeMap<i32, i64>, what: &str) -> Result<(), String> {
+    let missing: Vec<String> = products
+        .iter()
+        .filter(|p| counts.get(p).copied().unwrap_or(0) == 0)
+        .map(i32::to_string)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{what} 저장되지 않은 제품: {}", missing.join(", ")))
     }
 }
 
@@ -71,6 +123,7 @@ pub struct AgentDone {
     pub rounds: u32,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub model: String,
 }
 
 /// 작업 한 번의 결과 (AgentDone과 실행 기록의 재료)
@@ -86,6 +139,11 @@ impl JobOutcome {
     /// Claude를 부르기 전에 실패
     pub fn failed(error: impl Into<String>) -> Self {
         Self { ok: false, error: Some(error.into()), rounds: 0, input_tokens: 0, output_tokens: 0 }
+    }
+
+    /// Claude를 부르지 않고 성공으로 끝냄 (예: 한글 문서 번역 생략). note는 실행 기록 error에 남긴다
+    pub fn skipped(note: impl Into<String>) -> Self {
+        Self { ok: true, error: Some(note.into()), rounds: 0, input_tokens: 0, output_tokens: 0 }
     }
 
     /// 툴 루프를 마친 뒤 코드 판정 결과를 붙인다
@@ -172,6 +230,7 @@ where
                         rounds: outcome.rounds,
                         input_tokens: outcome.input_tokens,
                         output_tokens: outcome.output_tokens,
+                        model: model.to_string(),
                     };
                     if reply_to.tell(done.into()).is_err() {
                         warn!(agent = agent.as_str(), %doc_id, "AgentDone을 받을 액터가 멈춰 있습니다");
@@ -186,6 +245,8 @@ async fn run_job(agent: Agent, client: Arc<ClaudeClient>, pool: PgPool, doc_id: 
     let result = match agent {
         Agent::Extract => extract::run(&client, &pool, doc_id).await,
         Agent::Components => components::run(&client, &pool, doc_id).await,
+        Agent::Hazards => hazards::run(&client, &pool, doc_id).await,
+        Agent::Translate => translate::run(&client, &pool, doc_id).await,
     };
     result.unwrap_or_else(JobOutcome::failed)
 }

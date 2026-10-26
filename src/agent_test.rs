@@ -31,7 +31,9 @@ pub async fn run(pool: PgPool, mode: &str, doc_id: &str) -> Result<(), String> {
         "extract" => &[Agent::Extract],
         "components" => &[Agent::Components],
         "both" => &[Agent::Extract, Agent::Components],
-        other => return Err(format!("알 수 없는 모드: {other} (extract, components, both)")),
+        "hazards" => &[Agent::Hazards],
+        "translate" => &[Agent::Translate],
+        other => return Err(format!("알 수 없는 모드: {other} (extract, components, both, hazards, translate)")),
     };
     let doc_id = Uuid::parse_str(doc_id.trim()).map_err(|_| format!("doc_id가 UUID 형식이 아닙니다: {doc_id}"))?;
     crate::actors::log_models();
@@ -57,8 +59,9 @@ pub async fn run(pool: PgPool, mode: &str, doc_id: &str) -> Result<(), String> {
         }
         let elapsed = started.elapsed();
         println!(
-            "[{}] ok={} rounds={} input_tokens={} output_tokens={} 걸린 시간={:.1}s{}",
+            "[{}] model={} ok={} rounds={} input_tokens={} output_tokens={} 걸린 시간={:.1}s{}",
             done.agent.as_str(),
+            done.model,
             done.ok,
             done.rounds,
             done.input_tokens,
@@ -77,6 +80,12 @@ pub async fn run(pool: PgPool, mode: &str, doc_id: &str) -> Result<(), String> {
     print_sections(&pool, doc_id).await?;
     if agents.contains(&Agent::Components) {
         print_components(&pool, doc_id).await?;
+    }
+    if agents.contains(&Agent::Hazards) {
+        print_hazards(&pool, doc_id).await?;
+    }
+    if agents.contains(&Agent::Translate) {
+        print_translations(&pool, doc_id).await?;
     }
     let (rounds, input, output) = dones
         .iter()
@@ -143,6 +152,84 @@ async fn print_components(pool: &PgPool, doc_id: Uuid) -> Result<(), String> {
             valid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
             pct.unwrap_or_default(),
         );
+    }
+    Ok(())
+}
+
+async fn print_hazards(pool: &PgPool, doc_id: Uuid) -> Result<(), String> {
+    let rows: Vec<(i32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT product_no, h_code, ghs_code, source, signal_word, note FROM msds_hazards \
+             WHERE doc_id = $1 ORDER BY product_no, id",
+        )
+        .bind(doc_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("유해성 조회 실패: {e}"))?;
+
+    println!("\n## 그림문자 (제품별)");
+    let mut products: std::collections::BTreeMap<i32, Vec<_>> = std::collections::BTreeMap::new();
+    for r in rows {
+        products.entry(r.0).or_default().push(r);
+    }
+    for (p, rows) in products {
+        let ghs: std::collections::BTreeSet<&str> = rows.iter().filter_map(|r| r.2.as_deref()).collect();
+        let mut codes: Vec<String> = Vec::new();
+        for r in &rows {
+            if let Some(h) = &r.1 {
+                let label = format!("{h}({})", r.3.as_deref().unwrap_or("-"));
+                if !codes.contains(&label) {
+                    codes.push(label);
+                }
+            }
+        }
+        let first = &rows[0];
+        println!(
+            "제품 {p}: 그림문자 [{}] 신호어={} H코드(출처)={}{}",
+            ghs.into_iter().collect::<Vec<_>>().join(", "),
+            first.4.as_deref().unwrap_or("-"),
+            if codes.is_empty() { "없음(no_h_codes)".to_string() } else { codes.join(" ") },
+            first.5.as_deref().map(|n| format!(" note={n}")).unwrap_or_default(),
+        );
+    }
+    Ok(())
+}
+
+async fn print_translations(pool: &PgPool, doc_id: Uuid) -> Result<(), String> {
+    let (language,): (Option<String>,) = sqlx::query_as("SELECT language FROM msds_documents WHERE id = $1")
+        .bind(doc_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("문서 조회 실패: {e}"))?;
+    if language.as_deref() == Some("ko") {
+        println!("\n## 번역\n{}", crate::actors::translate::KO_SKIP_NOTE);
+        return Ok(());
+    }
+    let rows: Vec<(i32, i32, i32, i32, i64)> = sqlx::query_as(
+        "SELECT s.product_no, s.section_no, coalesce(char_length(s.text), 0), \
+         coalesce((SELECT sum(char_length(t.text_ko)) FROM msds_translations t WHERE t.doc_id = s.doc_id \
+           AND t.product_no = s.product_no AND t.section_no = s.section_no), 0)::int, \
+         (SELECT count(*) FROM msds_translations t WHERE t.doc_id = s.doc_id \
+           AND t.product_no = s.product_no AND t.section_no = s.section_no) \
+         FROM msds_sections s WHERE s.doc_id = $1 ORDER BY s.product_no, s.section_no",
+    )
+    .bind(doc_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("번역 조회 실패: {e}"))?;
+
+    let targets = crate::actors::translate::parse_sections(std::env::var("MSDS_TRANSLATE_SECTIONS").ok().as_deref())?;
+    let check = crate::actors::translate::check_saved(pool, doc_id, &targets).await?;
+    println!("\n## 번역 (대상 섹션 {:?})", targets);
+    println!("| 제품 | 섹션 | 원문 글자 | 번역 글자 | 조각 |");
+    println!("|---|---|---|---|---|");
+    for (p, s, src, ko, chunks) in rows.iter().filter(|r| targets.contains(&r.1)) {
+        println!("| {p} | {s} | {src} | {ko} | {chunks} |");
+    }
+    println!("빠진 섹션: {}", if check.missing.is_empty() { "없음".into() } else { check.missing.join(", ") });
+    println!("사후 검사 경고 {}건", check.warnings.len());
+    for w in &check.warnings {
+        println!("- {w}");
     }
     Ok(())
 }

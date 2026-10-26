@@ -13,10 +13,13 @@ use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::validate::{self, MAX_UPLOAD_BYTES};
+use crate::validate;
 use crate::{db, pdf};
 
 const UPLOAD_DIR: &str = "data/uploads";
+/// 요청 본문 한도. 파일 한도(validate::MAX_UPLOAD_BYTES, 20MB)에 multipart 헤더 여유를 더해
+/// 20MB를 조금 넘는 파일도 413이 아니라 validate_file의 400으로 거른다
+const MAX_BODY_BYTES: usize = 21 * 1024 * 1024;
 const PREVIEW_CHARS: usize = 300;
 
 #[derive(Clone)]
@@ -28,7 +31,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/api/msds/upload",
-            post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+            post(upload).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)),
         )
         .route("/api/msds/:id/pages", get(pages))
         .layer(CorsLayer::permissive())

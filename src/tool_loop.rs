@@ -24,6 +24,8 @@ pub struct LoopResult {
     pub rounds: u32,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// stop_reason이 max_tokens였던 응답 수 (응답이 잘렸을 수 있음)
+    pub max_tokens_stops: u32,
 }
 
 #[derive(Debug)]
@@ -122,6 +124,7 @@ pub async fn run_tool_loop(
         rounds: 0,
         input_tokens: 0,
         output_tokens: 0,
+        max_tokens_stops: 0,
     };
 
     while result.rounds < max_rounds {
@@ -188,6 +191,9 @@ async fn call(
     let resp = client.send_message(&req).await?;
     result.input_tokens += resp.usage.input_tokens;
     result.output_tokens += resp.usage.output_tokens;
+    if resp.stop_reason == "max_tokens" {
+        result.max_tokens_stops += 1;
+    }
     Ok(resp)
 }
 

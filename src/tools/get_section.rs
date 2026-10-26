@@ -7,7 +7,13 @@ use sqlx::PgPool;
 use super::common::{check_product_no, check_section_no, ensure_doc, finish, first_product, input_err, parse_input, Fail};
 use super::text::char_window;
 
+/// 한 번에 돌려주는 최대 글자 수 (max_chars 기본값이자 상한)
 const MAX_CHARS: usize = 15_000;
+const MIN_CHARS: usize = 1_000;
+
+fn default_max_chars() -> usize {
+    MAX_CHARS
+}
 
 pub struct GetSectionTool {
     pool: PgPool,
@@ -27,6 +33,8 @@ struct Input {
     section_no: i32,
     #[serde(default)]
     offset: usize,
+    #[serde(default = "default_max_chars")]
+    max_chars: usize,
 }
 
 impl GetSectionTool {
@@ -66,7 +74,10 @@ impl GetSectionTool {
         if input.offset > total {
             return input_err(format!("offset {}이 전체 글자 수 {total}보다 큽니다", input.offset));
         }
-        let chunk = char_window(&text, input.offset, MAX_CHARS);
+        if !(MIN_CHARS..=MAX_CHARS).contains(&input.max_chars) {
+            return input_err(format!("max_chars는 {MIN_CHARS}~{MAX_CHARS}이어야 합니다: {}", input.max_chars));
+        }
+        let chunk = char_window(&text, input.offset, input.max_chars);
         let end = input.offset + chunk.chars().count();
 
         Ok(json!({
@@ -88,7 +99,7 @@ impl Tool for GetSectionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "msds_get_section".into(),
-            description: "저장된 섹션 본문을 offset(글자 단위, 기본 0)부터 최대 15000자 돌려준다. \
+            description: "저장된 섹션 본문을 offset(글자 단위, 기본 0)부터 max_chars자(기본·최대 15000, 최소 1000) 돌려준다. \
                           next_offset이 null이 아니면 그 값으로 다시 호출해 나머지를 읽는다. \
                           section_no는 GHS 표준 번호, product_no는 다중 제품 문서의 제품 번호(기본 1)다."
                 .into(),
@@ -98,7 +109,9 @@ impl Tool for GetSectionTool {
                     "doc_id": { "type": "string" },
                     "product_no": { "type": "integer", "minimum": 1, "default": 1 },
                     "section_no": { "type": "integer", "minimum": 1, "maximum": 16 },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 }
+                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 15000, "default": 15000,
+                                   "description": "한 번에 읽을 최대 글자 수" }
                 },
                 "required": ["doc_id", "section_no"]
             }),

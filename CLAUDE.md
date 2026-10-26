@@ -20,7 +20,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - msds_doc_info {doc_id} → {file_name, page_count, language, products:[{product_no, product_name, section_nos}]}
   - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자), following_lines?}], total_found, truncated, order_ok, backsteps} (최대 200개, 판단은 모델. order_ok=false면 저장하지 말고 보고. 1번 섹션 후보만 아래 빈 줄 아닌 10줄(줄마다 120자)을 following_lines로 준다)
   - msds_save_sections {doc_id, sections:[{product_no=1, product_name?, section_no 1~16(표준 번호), original_no?, title, page_no, line_no}]} → {products:[{product_no, product_name, sections:[{section_no, original_no, title, chars}], missing_sections, warnings}]} (본문은 위치로 잘라 저장, 문서 단위 교체, 2만 자 넘는 섹션 경고)
-  - msds_get_section {doc_id, product_no=1, section_no, offset=0} → {product_no, product_name, section_no, original_no, title, text(최대 15000자), offset, total_chars, next_offset|null}
+  - msds_get_section {doc_id, product_no=1, section_no, offset=0, max_chars=15000(1000~15000)} → {product_no, product_name, section_no, original_no, title, text(최대 max_chars자), offset, total_chars, next_offset|null}
   - msds_save_components {doc_id, product_no=1, product_name?, components:[{product_name?, component, cas_no, percent}]} → {rows:[{component, cas_no, cas_valid}], invalid_cas, notice?} (CAS 틀려도 cas_valid=false로 저장, (doc_id, product_no) 단위 교체, 제품명은 msds_sections 이름 우선)
   - msds_save_hazards {doc_id, product_no=1, h_codes?, classifications?:[{hazard_class(enum), category}], signal_word?, note?} → {status(ok|no_h_codes), pictograms:[{ghs_code, symbol_name, h_codes}], h_codes:[{h_code, sources, evidence, pictograms}], no_pictogram, unknown_codes, unknown_classifications, suppressed_ghs07, warnings} ((doc_id, product_no) 단위 교체)
   - msds_save_translation {doc_id, product_no=1, section_no, chunk_no=0, title_ko, text_ko} → {chars, saved_chunks} ((doc_id, product_no, section_no, chunk_no) 단위 교체)
@@ -46,15 +46,15 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - 좌표 방식이 실패하거나 결과가 비면 기본 추출(extract_text_from_mem_by_pages)로 대신한다
   - 공백을 뺀 글자 수 합이 200 미만이면 status='failed', error="텍스트가 없는 PDF입니다(스캔본일 수 있음)"
 - sqlx는 query! 매크로 대신 sqlx::query() 함수를 쓴다
-- 업로드 라우트에 DefaultBodyLimit 20MB
+- 업로드 크기: 파일 20MB(validate_file), 요청 본문 21MB(DefaultBodyLimit, multipart 헤더 여유)
 - 샘플 PDF와 업로드 파일은 data/ 아래에만 둔다 (git 제외)
 
 # 에이전트 구조 (src/actors/, 프롬프트는 src/prompts.rs)
 - AgentActor<R>: Run { doc_id, reply_to: ActorRef<R> }를 받으면 tokio::spawn으로 작업을 띄우고 바로 돌아온다. R::Message는 From<AgentDone>
 - 작업이 끝나면(panic 포함) msds_agent_runs에 한 행(ok, error, rounds, 토큰, 시작·끝 시각)을 남기고 reply_to.tell(AgentDone)
-- ToolRegistry는 실행마다 그 에이전트의 툴만 담아 새로 만든다: 추출 = find_headings, save_sections / 성분 = get_section, save_components
-- max_tokens: 추출 4096, 성분 8192
-- 테스트: cargo run -- agent-test <extract|components|both> <doc_id> (both는 추출 실패 시 성분 생략)
+- ToolRegistry는 실행마다 그 에이전트의 툴만 담아 새로 만든다: 추출 = find_headings, save_sections / 성분 = get_section, save_components / 그림문자 = get_section, save_hazards / 번역 = get_section, save_translation
+- max_tokens: 추출 4096, 성분 8192, 그림문자 4096, 번역 8192
+- 테스트: cargo run -- agent-test <extract|components|both|hazards|translate> <doc_id> (both는 추출 실패 시 성분 생략)
 
 # 사전 검사 (실패하면 Claude를 부르지 않고 ok=false)
 - 추출: 제목 후보의 서로 다른 번호가 8개 미만 → "MSDS 문서가 아닌 것으로 보입니다(섹션 제목 부족)", 순서가 뒤로 가면(backsteps) → "섹션 순서가 뒤섞인 문서입니다"
@@ -90,3 +90,26 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 검사는 src/validate.rs의 순수 함수(validate_file, validate_text, validate_upload)로만 한다. 다른 런타임(Cloudflare Worker 등)에 같은 규칙으로 옮길 수 있게 DB·IO를 넣지 않는다
 - 추출 에이전트의 사전 검사는 안전장치로 남긴다(기준 MIN_DISTINCT_HEADINGS는 headings.rs 공용)
 - 저장된 문서 재검사: cargo run -- validate-docs (상태는 바꾸지 않음)
+
+# 그림문자 에이전트 (src/actors/hazards.rs)
+- 사전 검사: msds_sections에 제품이 없으면 Claude를 부르지 않고 ok=false("추출 결과 없음")
+- 제품마다 표준 2번 섹션을 끝까지 읽고, 문서에 적힌 H코드(묶음 포함)와 신호어를 그대로 보낸다. H코드가 없으면 분류를 classifications로, 둘 다 없으면 h_codes 빈 목록 + note
+- 증상 설명, HMIS·NFPA 숫자, 다른 섹션 내용으로 분류를 추측하지 않는다
+- 성공 판정: 제품마다 msds_hazards 행이 1개 이상(no_h_codes 행 포함)
+
+# 번역 에이전트 (src/actors/translate.rs)
+- language가 ko면 Claude를 부르지 않고 ok=true, 실행 기록 error에 "한글 문서라 번역 생략"
+- (제품, 섹션)마다 툴 루프를 따로 실행한다(대화를 새로 시작해 입력 토큰이 쌓이지 않게). 루프마다 자기 ToolRegistry, 시작 전에 그 섹션의 기존 번역을 지운다
+- msds_get_section을 max_chars 6000으로 읽고 조각마다 chunk_no 0부터 저장, title_ko는 chunk 0
+- 제품명, CAS, H·P 코드, 화학식, 숫자, 단위, 법규 이름은 원문 그대로. 한국어 부분은 그대로, 표는 줄 구조 유지, 요약·생략 금지
+- 성공 판정: 대상 섹션 중 원문에 있는 섹션이 모두 저장되면 ok. 빠지면 ok=false, error에 섹션 번호
+- 경고(실패 아님, 실행 기록 error에 남김): 사후 검사 결과, stop_reason이 max_tokens인 응답, 섹션 루프 오류
+
+# 번역 사후 검사 (순수 함수 preserved_tokens, missing_in_translation)
+- 원문 섹션에서 체크섬이 맞는 CAS 번호, H코드(H200~H499, H360Fd는 H360), P코드(P100~P599), 제품명(원문 섹션에 있을 때)을 뽑아 번역문(조각을 이어 붙인 것)에 그대로 있는지 본다
+- ASCII 단어 경계로 찾아 한글 조사가 붙어도("H301을") 인식한다. EUH 코드는 보지 않는다
+
+# 환경변수 (개발·비용 조절용, .env.example 참고)
+- MSDS_MAX_ROUNDS: 툴 루프 최대 라운드(기본 10, 1~20)
+- MSDS_TRANSLATE_CONCURRENCY: 번역 섹션 동시 실행 수(기본 4, 1~16)
+- MSDS_TRANSLATE_SECTIONS: 번역할 섹션(예: "1-4,7,8", 비어 있으면 1~16). 형식이 틀리면 번역 에이전트가 ok=false
