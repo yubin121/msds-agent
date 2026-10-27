@@ -3,9 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
+use base64::Engine;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+
+use crate::tools::ghs::symbol_name;
 
 /// msds_components 한 행
 pub struct ComponentRow {
@@ -23,7 +26,6 @@ pub struct HazardRow {
     pub product_no: i32,
     pub h_code: Option<String>,
     pub ghs_code: Option<String>,
-    pub symbol_name: Option<String>,
     pub source: Option<String>,
     pub signal_word: Option<String>,
     pub note: Option<String>,
@@ -82,8 +84,9 @@ pub fn hazard_summary<'a>(rows: impl IntoIterator<Item = &'a HazardRow>) -> Haza
         }
         match (&r.h_code, &r.ghs_code) {
             (h, Some(g)) => {
+                // 이름은 저장된 symbol_name이 아니라 코드로 표에서 찾는다(이름표를 바꾸기 전에 저장된 행도 같은 이름으로)
                 let entry = pictograms.entry(g.clone()).or_insert_with(|| {
-                    (r.symbol_name.clone().unwrap_or_default(), BTreeSet::new(), BTreeSet::new())
+                    (symbol_name(g).to_string(), BTreeSet::new(), BTreeSet::new())
                 });
                 if let Some(h) = h {
                     entry.1.insert(h.clone());
@@ -168,19 +171,6 @@ pub fn merge_translations(rows: &[(i32, i32, i32, Option<String>, Option<String>
 
 // ---- legacy (기존 서비스 5001과 같은 응답) ----
 
-/// 기존 서비스의 그림문자 이름 표기
-const LEGACY_SYMBOL_NAMES: [(&str, &str); 9] = [
-    ("GHS01", "폭발하는 폭탄"),
-    ("GHS02", "불꽃"),
-    ("GHS03", "원 위의 불꽃"),
-    ("GHS04", "가스 실린더"),
-    ("GHS05", "부식성"),
-    ("GHS06", "해골과 X자형 뼈"),
-    ("GHS07", "감탄부호"),
-    ("GHS08", "건강 유해성"),
-    ("GHS09", "환경"),
-];
-
 /// 기존 서비스의 "비공개" 판정 값 (앞뒤 공백 무시, null은 대소문자 무시)
 const LEGACY_PRIVATE: [&str; 5] = ["비공개", "영업비밀", "", "-", "null"];
 
@@ -203,8 +193,26 @@ pub struct LegacyProduct {
     pub components: Vec<LegacyComponent>,
 }
 
-fn legacy_symbol_name(ghs: &str) -> &'static str {
-    LEGACY_SYMBOL_NAMES.iter().find(|(g, _)| *g == ghs).map(|(_, n)| *n).unwrap_or("")
+/// 그림문자 PNG (미국 OSHA, Public Domain. 화면과 같은 파일을 빌드 때 넣는다, 출처는 frontend/README.md)
+const PICTOGRAM_PNGS: [(&str, &[u8]); 9] = [
+    ("GHS01", include_bytes!("../frontend/assets/ghs/GHS01.png")),
+    ("GHS02", include_bytes!("../frontend/assets/ghs/GHS02.png")),
+    ("GHS03", include_bytes!("../frontend/assets/ghs/GHS03.png")),
+    ("GHS04", include_bytes!("../frontend/assets/ghs/GHS04.png")),
+    ("GHS05", include_bytes!("../frontend/assets/ghs/GHS05.png")),
+    ("GHS06", include_bytes!("../frontend/assets/ghs/GHS06.png")),
+    ("GHS07", include_bytes!("../frontend/assets/ghs/GHS07.png")),
+    ("GHS08", include_bytes!("../frontend/assets/ghs/GHS08.png")),
+    ("GHS09", include_bytes!("../frontend/assets/ghs/GHS09.png")),
+];
+
+/// legacy image: 그림문자 PNG를 변환 없이 base64로 (모르는 코드는 "")
+fn pictogram_base64(ghs: &str) -> String {
+    PICTOGRAM_PNGS
+        .iter()
+        .find(|(g, _)| *g == ghs)
+        .map(|(_, png)| base64::engine::general_purpose::STANDARD.encode(png))
+        .unwrap_or_default()
 }
 
 fn is_private(value: &str) -> bool {
@@ -276,7 +284,7 @@ pub fn legacy_status(products: &[LegacyProduct]) -> u16 {
 }
 
 /// hazard_symbol: 제품마다 ghs_code 중복 없이 (msds_hazards는 GHS07 생략 규칙을 적용한 최종 결과다).
-/// image는 그림문자 PNG 파일을 준비하기 전까지 ""
+/// image는 그림문자 PNG의 base64
 pub fn legacy_hazard_symbols(products: &[LegacyProduct], hazards: &[HazardRow]) -> Vec<Value> {
     let mut out = Vec::new();
     for p in products {
@@ -284,9 +292,9 @@ pub fn legacy_hazard_symbols(products: &[LegacyProduct], hazards: &[HazardRow]) 
             hazards.iter().filter(|h| h.product_no == p.product_no).filter_map(|h| h.ghs_code.as_deref()).collect();
         for g in codes {
             out.push(json!({
-                "image": "",
+                "image": pictogram_base64(g),
                 "ghs_code": g,
-                "symbol_name": legacy_symbol_name(g),
+                "symbol_name": symbol_name(g),
                 "product_name": p.name,
             }));
         }
@@ -348,7 +356,6 @@ mod tests {
             product_no,
             h_code: h.map(str::to_string),
             ghs_code: g.map(str::to_string),
-            symbol_name: g.map(|g| crate::tools::ghs::symbol_name(g).to_string()),
             source: h.map(|_| source.to_string()),
             signal_word: Some("위험".into()),
             note: None,
@@ -378,6 +385,7 @@ mod tests {
         let s = hazard_summary(rows.iter().filter(|r| r.product_no == 1));
         assert_eq!(s.pictograms.len(), 2);
         assert_eq!(s.pictograms[1].ghs_code, "GHS08");
+        assert_eq!(s.pictograms[1].symbol_name, "건강 유해성");
         assert_eq!(s.pictograms[1].h_codes, vec!["H304", "H373"]);
         assert_eq!(s.pictograms[1].sources, vec!["classification", "document"]);
         assert_eq!(s.h_codes_without_pictogram, vec!["H227"]);
@@ -390,7 +398,6 @@ mod tests {
             product_no: 1,
             h_code: None,
             ghs_code: None,
-            symbol_name: None,
             source: None,
             signal_word: None,
             note: Some("GHS 이전 양식".into()),
@@ -474,12 +481,24 @@ mod tests {
         assert_eq!(v["hazard_symbol"].as_array().unwrap().len(), 1);
         assert_eq!(v["hazard_symbol"][0]["symbol_name"], "감탄부호");
         assert_eq!(v["hazard_symbol"][0]["product_name"], "ATL");
-        assert_eq!(v["hazard_symbol"][0]["image"], "");
+        // image는 GHS07.png 파일 그대로의 base64
+        let image = base64::engine::general_purpose::STANDARD
+            .decode(v["hazard_symbol"][0]["image"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(image, include_bytes!("../frontend/assets/ghs/GHS07.png"));
         assert_eq!(v["translation_mono"], "");
 
         // 그림문자가 없으면 빈 문자열
         let v = legacy_body(&products, &[]);
         assert_eq!(v["hazard_symbol"], "");
+    }
+
+    #[test]
+    fn pictogram_pngs_are_real_pngs() {
+        for (g, png) in PICTOGRAM_PNGS {
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "{g}");
+        }
+        assert_eq!(pictogram_base64("GHS10"), "");
     }
 
     #[test]

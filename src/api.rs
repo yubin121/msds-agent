@@ -247,7 +247,7 @@ async fn load_results(
     })
     .collect::<Vec<_>>();
     let hazards = sqlx::query(
-        "SELECT product_no, h_code, ghs_code, symbol_name, source, signal_word, note FROM msds_hazards \
+        "SELECT product_no, h_code, ghs_code, source, signal_word, note FROM msds_hazards \
          WHERE doc_id = $1 ORDER BY product_no, id",
     )
     .bind(id)
@@ -259,7 +259,6 @@ async fn load_results(
         product_no: r.get("product_no"),
         h_code: r.get("h_code"),
         ghs_code: r.get("ghs_code"),
-        symbol_name: r.get("symbol_name"),
         source: r.get("source"),
         signal_word: r.get("signal_word"),
         note: r.get("note"),
@@ -269,6 +268,9 @@ async fn load_results(
     Ok((products, components, hazards))
 }
 
+/// 에이전트 표 순서: 추출 → 성분 → 그림문자 → 번역 (실행 순서와 같게)
+const AGENT_ORDER: &str = "array_position(ARRAY['extract', 'components', 'hazards', 'translate'], agent)";
+
 /// 에이전트별 마지막 실행: 가장 최근 총괄 실행(pipeline_run_id)의 행, 없으면 에이전트마다 최신 행
 async fn last_agent_runs(pool: &PgPool, id: Uuid) -> Result<Vec<Value>, ApiError> {
     let columns = "agent, model, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at";
@@ -276,7 +278,7 @@ async fn last_agent_runs(pool: &PgPool, id: Uuid) -> Result<Vec<Value>, ApiError
         sqlx::query_as(&format!(
             "SELECT {columns} FROM msds_agent_runs WHERE doc_id = $1 AND pipeline_run_id = \
              (SELECT pipeline_run_id FROM msds_agent_runs WHERE doc_id = $1 AND pipeline_run_id IS NOT NULL \
-              ORDER BY id DESC LIMIT 1) ORDER BY id"
+              ORDER BY id DESC LIMIT 1) ORDER BY {AGENT_ORDER}, id"
         ))
         .bind(id)
         .fetch_all(pool)
@@ -285,7 +287,7 @@ async fn last_agent_runs(pool: &PgPool, id: Uuid) -> Result<Vec<Value>, ApiError
     let rows = if rows.is_empty() {
         sqlx::query_as(&format!(
             "SELECT {columns} FROM (SELECT DISTINCT ON (agent) * FROM msds_agent_runs WHERE doc_id = $1 \
-             ORDER BY agent, id DESC) r ORDER BY started_at"
+             ORDER BY agent, id DESC) r ORDER BY {AGENT_ORDER}"
         ))
         .bind(id)
         .fetch_all(pool)
@@ -307,6 +309,8 @@ async fn last_agent_runs(pool: &PgPool, id: Uuid) -> Result<Vec<Value>, ApiError
                 "ok": ok,
                 "error": error,
                 "seconds": seconds,
+                "started_at": started_at,
+                "finished_at": finished_at,
                 "rounds": rounds,
                 "input_tokens": input,
                 "output_tokens": output,

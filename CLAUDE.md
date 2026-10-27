@@ -145,7 +145,8 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - GET /api/msds/:id: 상세(없으면 404)
   - products: 제품 목록은 msds_sections 기준(없으면 결과 테이블의 product_no). 제품마다 components(component, cas_no, cas_valid, percent), pictograms(ghs_code, symbol_name, h_codes, sources), h_codes_without_pictogram, signal_word, note(no_h_codes 이유)
   - translations: 섹션별 title_ko(조각 0)와 조각을 chunk_no 순서로 줄바꿈으로 이어 붙인 text_ko
-  - agents: 가장 최근 pipeline_run_id의 실행 기록(없으면 에이전트마다 최신 행). ok, error, seconds, rounds, 토큰, model, cost_usd(모르는 모델은 null)
+  - agents: 가장 최근 pipeline_run_id의 실행 기록(없으면 에이전트마다 최신 행), 순서는 추출 → 성분 → 그림문자 → 번역으로 고정. ok, error, seconds, started_at, finished_at, rounds, 토큰, model, cost_usd(모르는 모델은 null)
+  - pictograms의 symbol_name은 msds_hazards.symbol_name이 아니라 ghs_code로 tools/ghs.rs의 PICTOGRAMS에서 찾는다(이름표를 바꾸기 전에 저장된 행도 같은 이름이 나오게)
 - 번역 텍스트는 상세 API에만 있다. legacy 응답의 translation_mono·dual은 항상 ""다(번역 PDF를 만들지 않음)
 
 # legacy 응답 (기존 서비스 5001 호환, 원본 코드 기준)
@@ -158,12 +159,24 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - 체크섬(cas_valid)은 쓰지 않는다(기존과 같게). 끝의 \b 때문에 "64742-54-71"이나 엑셀이 날짜로 바꾼 "1964-02-08"은 CAS 모양이 아니다
 - casno: 원문 문자열(여러 개면 "a, b" 한 문자열, 없으면 "", 비공개는 "비공개"). cas_valid는 넣지 않는다
 - 제품명이 없으면 "제품 N", 이름이 겹치면 " (2)"를 붙인다
-- hazard_symbol: 제품마다 ghs_code 중복 없이, GHS07 생략 규칙을 적용한 최종 결과(msds_hazards). symbol_name은 기존 표기(GHS01 폭발하는 폭탄, GHS02 불꽃, GHS03 원 위의 불꽃, GHS04 가스 실린더, GHS05 부식성, GHS06 해골과 X자형 뼈, GHS07 감탄부호, GHS08 건강 유해성, GHS09 환경). image는 그림문자 PNG의 base64(파일을 준비하기 전까지 "")
+- hazard_symbol: 제품마다 ghs_code 중복 없이, GHS07 생략 규칙을 적용한 최종 결과(msds_hazards). symbol_name은 기존 표기이고, 이름표는 tools/ghs.rs의 PICTOGRAMS 한 곳뿐이다(툴 결과·DB·상세 API·legacy·화면 공용)(GHS01 폭발하는 폭탄, GHS02 불꽃, GHS03 원 위의 불꽃, GHS04 가스 실린더, GHS05 부식성, GHS06 해골과 X자형 뼈, GHS07 감탄부호, GHS08 건강 유해성, GHS09 환경). image는 그림문자 PNG(frontend/assets/ghs/GHSnn.png)의 base64
 - 문서 상태별: done·partial은 있는 결과로 위 규칙 적용(기존도 실패한 부분은 비우고 응답) / failed는 {"status":400,"error"}: 업로드 검증 실패면 그 메시지, 분석 실패(총괄 실행 기록이 있거나 재시작으로 중단)면 "MSDS 문서를 입력하세요." / queued·analyzing·uploaded는 HTTP 409 {"error":"분석 중입니다"} / 문서가 없으면 HTTP 404
 - POST /api/legacy/casNoExtraction(동기식): multipart file(+ companycode, companyname은 받기만 하고 쓰지 않음). 업로드 검증 → 저장 → Analyze → 판정까지 기다린 뒤 legacy 모양으로 응답. 검증 실패는 HTTP 200 {"status":400,"error"}
   - 목적: 기존 host-runner의 MSDS_AI_URL만 바꿔 결과를 비교한다
   - 0.5초마다 DB status를 확인해 done·partial·failed를 기다린다. 최대 MSDS_DOC_TIMEOUT_SECS + 10초(총괄 타이머가 Analyze를 받은 뒤 시작하므로 여유). 대기열에서 오래 기다려 넘기면 409 "분석 중입니다"
   - 그래서 기존 host-runner의 대기 한도(600초)는 MSDS_DOC_TIMEOUT_SECS + 10초보다 길게 두어야 한다(기본값이면 610초 초과)
+
+# 화면 (frontend/, Yew, 메인 크레이트와 따로 빌드)
+- trunk serve(8080). /api는 Trunk.toml proxy로 서버(8090)에 보낸다(CORS 없음). Tailwind는 trunk 내장(Trunk.toml에 3.4.17 고정)
+- 의존 버전은 Cargo.toml에 =로 고정(yew 0.21.0, yew-router 0.18.0, gloo-net 0.6.0, gloo-timers 0.3.0)
+- 파일은 snake_case(Rust 관례), 컴포넌트 함수는 PascalCase, 한 파일에 컴포넌트 하나(src/components/). 전역 상태 라이브러리는 쓰지 않는다(선택한 문서는 라우트로 전달)
+- 목록은 3초마다, 상세는 queued·analyzing일 때만 3초마다 다시 불러온다
+- 그림문자 이름은 서버가 준 symbol_name을 그대로 쓴다(화면에 이름표를 두지 않음). "경고(느낌표)" 같은 이름은 신호어 "경고"와 헷갈려서 쓰지 않는다
+- 에이전트 실행 표 아래 합계 줄: 호출 수·입력/출력 토큰·추정 비용의 합. 시간은 에이전트가 동시에 돌아 단순 합이 틀리므로 가장 이른 started_at부터 가장 늦은 finished_at까지를 "전체"로 보여 준다(값이 없으면 생략)
+- 번역이 없으면 제목은 "번역"만, 한글 문서면 "한글 문서라 번역하지 않았습니다"만 보여 준다
+- 그림문자 이미지: frontend/assets/ghs/GHS01~09.png = 미국 OSHA 그림문자(https://www.osha.gov/hazcom/pictograms, 각 이미지에 "Copyright: Public Domain", 2026-10-27 내려받음). GHS09만 원본 3660px을 1017px로 축소(sips -Z 1017), 나머지 8개는 원본 그대로. 화면 크기는 CSS로 조정. 대응표는 frontend/README.md
+  - UNECE 파일은 쓰지 않는다(UN 웹사이트 이용 조건이 개인·비상업 용도로 한정, 재배포·2차 저작물 불가)
+  - 서버 legacy 응답의 image는 같은 파일을 src/api_view.rs가 include_bytes!로 넣어 base64로 보낸다(변환 없음, 실행 위치와 무관)
 
 # 번역 사후 검사 (순수 함수 post_check, 모두 실패가 아니라 경고)
 - 보존 토큰(preserved_tokens, missing_in_translation): 원문 섹션에서 체크섬이 맞는 CAS 번호, H코드(H200~H499, H360Fd는 H360), P코드(P100~P599), 제품명(원문 섹션에 있을 때)을 뽑아 번역문(조각을 이어 붙인 것)에 그대로 있는지 본다

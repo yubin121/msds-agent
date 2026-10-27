@@ -1,0 +1,11 @@
+pub mod agent_runs;
+pub mod app;
+pub mod component_table;
+pub mod doc_detail;
+pub mod doc_list;
+pub mod hazard_panel;
+pub mod home_page;
+pub mod product_view;
+pub mod status_badge;
+pub mod translation_list;
+pub mod upload_form;

@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[tools]
+tailwindcss = "3.4.17"
+
+[serve]
+port = 8080
+
+# API는 서버(8090)로 보낸다(CORS 없이)
+[[proxy]]
+backend = "http://localhost:8090/api/"
+# 10-3: Worker로 바꾸면 화면 → Worker(8787) → 서버
+# backend = "http://localhost:8787/api/"
