@@ -11,11 +11,14 @@ use axum::{
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 use pekko_actor::ActorRef;
 use uuid::Uuid;
 
 use crate::actors::supervisor::{Supervisor, SupervisorMsg};
-use crate::validate;
+use crate::{api_view, validate};
 use crate::{db, pdf};
 
 const UPLOAD_DIR: &str = "data/uploads";
@@ -36,8 +39,15 @@ pub fn router(state: AppState) -> Router {
             "/api/msds/upload",
             post(upload).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)),
         )
+        .route("/api/msds", get(list))
+        .route("/api/msds/:id", get(detail))
+        .route("/api/msds/:id/legacy", get(legacy))
         .route("/api/msds/:id/pages", get(pages))
         .route("/api/msds/:id/analyze", post(analyze))
+        .route(
+            "/api/legacy/casNoExtraction",
+            post(legacy_extract).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -65,7 +75,27 @@ fn multipart_error(e: MultipartError) -> ApiError {
     ApiError(e.status(), msg)
 }
 
-async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<Json<Value>, ApiError> {
+async fn upload(State(st): State<AppState>, multipart: Multipart) -> Result<Json<Value>, ApiError> {
+    let doc = receive_upload(&st, multipart).await?;
+    queue_analysis(&st, doc.doc_id).await?;
+    Ok(Json(json!({
+        "doc_id": doc.doc_id,
+        "file_name": doc.file_name,
+        "page_count": doc.page_count,
+        "language": doc.language,
+        "status": "queued",
+    })))
+}
+
+struct Uploaded {
+    doc_id: Uuid,
+    file_name: String,
+    page_count: i32,
+    language: &'static str,
+}
+
+/// 업로드 공통: 파일 받기 → 검증 → 저장 → 페이지 추출. 검증 실패는 400(문서는 failed로 남김)
+async fn receive_upload(st: &AppState, mut multipart: Multipart) -> Result<Uploaded, ApiError> {
     let doc_id = Uuid::new_v4();
 
     // 파일 파트는 필드 이름 "file"로 찾는다.
@@ -119,14 +149,7 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
     }
 
     tracing::info!(%doc_id, page_count, language, fallback = extracted.fallback, "업로드 완료");
-    queue_analysis(&st, doc_id).await?;
-    Ok(Json(json!({
-        "doc_id": doc_id,
-        "file_name": file_name,
-        "page_count": page_count,
-        "language": language,
-        "status": "queued",
-    })))
+    Ok(Uploaded { doc_id, file_name, page_count, language })
 }
 
 /// 이미 올린 문서를 다시 분석한다. 분석 중이거나 대기 중이면 409.
@@ -150,6 +173,226 @@ async fn analyze(State(st): State<AppState>, Path(id): Path<Uuid>) -> Result<(St
 async fn queue_analysis(st: &AppState, doc_id: Uuid) -> Result<(), ApiError> {
     db::set_status(&st.pool, doc_id, "queued", None).await.map_err(internal)?;
     st.supervisor.tell(SupervisorMsg::Analyze { doc_id }).map_err(|e| internal(format!("총괄 액터에 Analyze 전송 실패: {e}")))
+}
+
+type DocRow = (Uuid, Option<String>, Option<String>, Option<i32>, String, Option<String>, Option<DateTime<Utc>>);
+
+const DOC_COLUMNS: &str = "id, file_name, language, page_count, status, error, created_at";
+/// 분석이 끝난 상태 (casNoExtraction이 기다리는 대상)
+const FINAL_STATUSES: [&str; 3] = ["done", "partial", "failed"];
+/// casNoExtraction이 판정을 확인하는 간격
+const LEGACY_POLL: Duration = Duration::from_millis(500);
+/// 총괄 액터의 타이머는 Analyze를 받은 뒤에 시작하므로, 기다리는 시간에 여유를 둔다
+const LEGACY_WAIT_MARGIN: Duration = Duration::from_secs(10);
+
+fn doc_json((id, file_name, language, page_count, status, error, created_at): DocRow) -> Value {
+    json!({
+        "id": id,
+        "file_name": file_name,
+        "language": language,
+        "page_count": page_count,
+        "status": status,
+        "error": error,
+        "created_at": created_at,
+    })
+}
+
+async fn find_doc(pool: &PgPool, id: Uuid) -> Result<DocRow, ApiError> {
+    sqlx::query_as(&format!("SELECT {DOC_COLUMNS} FROM msds_documents WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "문서를 찾을 수 없습니다".into()))
+}
+
+/// 문서 목록 (최신순)
+async fn list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<DocRow> =
+        sqlx::query_as(&format!("SELECT {DOC_COLUMNS} FROM msds_documents ORDER BY created_at DESC NULLS LAST, id"))
+            .fetch_all(&st.pool)
+            .await
+            .map_err(internal)?;
+    Ok(Json(Value::Array(rows.into_iter().map(doc_json).collect())))
+}
+
+/// 제품 목록, 성분, 유해성 행 (상세·legacy 공용)
+async fn load_results(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<(Vec<(i32, Option<String>)>, Vec<api_view::ComponentRow>, Vec<api_view::HazardRow>), ApiError> {
+    let sections: Vec<(i32, Option<String>)> = sqlx::query_as(
+        "SELECT product_no, max(product_name) FROM msds_sections WHERE doc_id = $1 GROUP BY product_no ORDER BY product_no",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .map_err(internal)?;
+    let components = sqlx::query(
+        "SELECT product_no, product_name, component, cas_no, percent, cas_valid FROM msds_components \
+         WHERE doc_id = $1 ORDER BY product_no, id",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .map_err(internal)?
+    .iter()
+    .map(|r| api_view::ComponentRow {
+        product_no: r.get("product_no"),
+        product_name: r.get("product_name"),
+        component: r.get("component"),
+        cas_no: r.get("cas_no"),
+        percent: r.get("percent"),
+        cas_valid: r.get("cas_valid"),
+    })
+    .collect::<Vec<_>>();
+    let hazards = sqlx::query(
+        "SELECT product_no, h_code, ghs_code, symbol_name, source, signal_word, note FROM msds_hazards \
+         WHERE doc_id = $1 ORDER BY product_no, id",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .map_err(internal)?
+    .iter()
+    .map(|r| api_view::HazardRow {
+        product_no: r.get("product_no"),
+        h_code: r.get("h_code"),
+        ghs_code: r.get("ghs_code"),
+        symbol_name: r.get("symbol_name"),
+        source: r.get("source"),
+        signal_word: r.get("signal_word"),
+        note: r.get("note"),
+    })
+    .collect::<Vec<_>>();
+    let products = api_view::product_list(&sections, &components, &hazards);
+    Ok((products, components, hazards))
+}
+
+/// 에이전트별 마지막 실행: 가장 최근 총괄 실행(pipeline_run_id)의 행, 없으면 에이전트마다 최신 행
+async fn last_agent_runs(pool: &PgPool, id: Uuid) -> Result<Vec<Value>, ApiError> {
+    let columns = "agent, model, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at";
+    let rows: Vec<(String, Option<String>, bool, Option<String>, Option<i32>, Option<i32>, Option<i32>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
+        sqlx::query_as(&format!(
+            "SELECT {columns} FROM msds_agent_runs WHERE doc_id = $1 AND pipeline_run_id = \
+             (SELECT pipeline_run_id FROM msds_agent_runs WHERE doc_id = $1 AND pipeline_run_id IS NOT NULL \
+              ORDER BY id DESC LIMIT 1) ORDER BY id"
+        ))
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .map_err(internal)?;
+    let rows = if rows.is_empty() {
+        sqlx::query_as(&format!(
+            "SELECT {columns} FROM (SELECT DISTINCT ON (agent) * FROM msds_agent_runs WHERE doc_id = $1 \
+             ORDER BY agent, id DESC) r ORDER BY started_at"
+        ))
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .map_err(internal)?
+    } else {
+        rows
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(agent, model, ok, error, rounds, input, output, started_at, finished_at)| {
+            let (input, output) = (input.unwrap_or(0), output.unwrap_or(0));
+            let seconds = started_at
+                .zip(finished_at)
+                .map(|(s, f)| (f - s).num_milliseconds() as f64 / 1000.0);
+            let cost = crate::cost::estimate(model.as_deref().unwrap_or(""), input as u64, output as u64);
+            json!({
+                "agent": agent,
+                "ok": ok,
+                "error": error,
+                "seconds": seconds,
+                "rounds": rounds,
+                "input_tokens": input,
+                "output_tokens": output,
+                "model": model,
+                "cost_usd": cost,
+            })
+        })
+        .collect())
+}
+
+/// 문서 상세: 제품별 성분·그림문자, 섹션별 번역, 에이전트별 마지막 실행
+async fn detail(State(st): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
+    let doc = find_doc(&st.pool, id).await?;
+    let (products, components, hazards) = load_results(&st.pool, id).await?;
+    let translations: Vec<(i32, i32, i32, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT product_no, section_no, chunk_no, title_ko, text_ko FROM msds_translations \
+         WHERE doc_id = $1 ORDER BY product_no, section_no, chunk_no",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .map_err(internal)?;
+
+    let mut body = doc_json(doc);
+    body["products"] = Value::Array(api_view::detail_products(&products, &components, &hazards));
+    body["translations"] = Value::Array(api_view::merge_translations(&translations));
+    body["agents"] = Value::Array(last_agent_runs(&st.pool, id).await?);
+    Ok(Json(body))
+}
+
+/// 기존 서비스(5001)와 같은 모양의 응답
+async fn legacy(State(st): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
+    legacy_response(&st.pool, id).await.map(Json)
+}
+
+async fn legacy_response(pool: &PgPool, id: Uuid) -> Result<Value, ApiError> {
+    let (_, _, _, _, status, error, _) = find_doc(pool, id).await?;
+    match status.as_str() {
+        "done" | "partial" => {
+            let (products, components, hazards) = load_results(pool, id).await?;
+            let products = api_view::legacy_products(&products, &components);
+            Ok(api_view::legacy_body(&products, &hazards))
+        }
+        "failed" => {
+            let (runs,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM msds_agent_runs WHERE doc_id = $1 AND pipeline_run_id IS NOT NULL",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .map_err(internal)?;
+            Ok(json!({ "status": 400, "error": api_view::legacy_failed_error(error.as_deref(), runs > 0) }))
+        }
+        // queued·analyzing·uploaded는 기존 서비스에 없는 상태다
+        _ => Err(ApiError(StatusCode::CONFLICT, "분석 중입니다".into())),
+    }
+}
+
+/// 기존 host-runner 호환(동기식): 업로드 → 분석 → 판정까지 기다린 뒤 legacy 모양으로 응답한다.
+/// companycode·companyname은 기존처럼 받지만 쓰지 않는다(기존은 통계 저장용)
+async fn legacy_extract(State(st): State<AppState>, multipart: Multipart) -> Result<Json<Value>, ApiError> {
+    let doc = match receive_upload(&st, multipart).await {
+        Ok(d) => d,
+        // 검증 실패도 기존처럼 HTTP 200에 본문 status 400
+        Err(ApiError(code, msg)) if code.is_client_error() => {
+            return Ok(Json(json!({ "status": 400, "error": msg })));
+        }
+        Err(e) => return Err(e),
+    };
+    queue_analysis(&st, doc.doc_id).await?;
+
+    let timeout = crate::actors::supervisor::parse_timeout_secs(std::env::var("MSDS_DOC_TIMEOUT_SECS").ok().as_deref());
+    let wait_until = tokio::time::Instant::now() + Duration::from_secs(timeout) + LEGACY_WAIT_MARGIN;
+    loop {
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM msds_documents WHERE id = $1")
+            .bind(doc.doc_id)
+            .fetch_one(&st.pool)
+            .await
+            .map_err(internal)?;
+        if FINAL_STATUSES.contains(&status.as_str()) || tokio::time::Instant::now() >= wait_until {
+            break;
+        }
+        tokio::time::sleep(LEGACY_POLL).await;
+    }
+    tracing::info!(doc_id = %doc.doc_id, "casNoExtraction 응답");
+    legacy_response(&st.pool, doc.doc_id).await.map(Json)
 }
 
 /// 업로드 검증 실패: 문서를 failed로 남기고 400으로 응답한다

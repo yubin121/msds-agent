@@ -1,6 +1,7 @@
 mod actors;
 mod agent_test;
 mod api;
+mod api_view;
 mod cost;
 mod db;
 mod pdf;

@@ -140,6 +140,31 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - API: 업로드 검증·저장이 성공하면 status 'queued'로 저장하고 Analyze를 tell, 바로 응답(status "queued"). POST /api/msds/:id/analyze는 재분석(202, 없는 문서 404, analyzing·queued면 409)
 - 비용: src/cost.rs의 단가 표(100만 토큰당 USD, claude-sonnet-5-5 입력 2 / 출력 10, claude-haiku-5-5 0.1 / 0.5). 표에 없는 모델은 비용을 비운다
 
+# 조회 API (src/api.rs, 응답 조립은 순수 함수 src/api_view.rs)
+- GET /api/msds: 문서 목록(id, file_name, language, page_count, status, error, created_at), 최신순
+- GET /api/msds/:id: 상세(없으면 404)
+  - products: 제품 목록은 msds_sections 기준(없으면 결과 테이블의 product_no). 제품마다 components(component, cas_no, cas_valid, percent), pictograms(ghs_code, symbol_name, h_codes, sources), h_codes_without_pictogram, signal_word, note(no_h_codes 이유)
+  - translations: 섹션별 title_ko(조각 0)와 조각을 chunk_no 순서로 줄바꿈으로 이어 붙인 text_ko
+  - agents: 가장 최근 pipeline_run_id의 실행 기록(없으면 에이전트마다 최신 행). ok, error, seconds, rounds, 토큰, model, cost_usd(모르는 모델은 null)
+- 번역 텍스트는 상세 API에만 있다. legacy 응답의 translation_mono·dual은 항상 ""다(번역 PDF를 만들지 않음)
+
+# legacy 응답 (기존 서비스 5001 호환, 원본 코드 기준)
+- GET /api/msds/:id/legacy, POST /api/legacy/casNoExtraction이 같은 모양으로 응답한다
+- 모양: { status, product: {"<제품명>": [{component, percent, casno}]}, hazard_symbol: [{image, ghs_code, symbol_name, product_name}] 또는 그림문자가 없으면 "", translation_mono: "", translation_dual: "" }
+- status는 본문 필드에만 넣고 HTTP는 200이다. status는 진행 상태가 아니라 결과의 종류다. 판정 순서(legacy_status):
+  1) 기본 201(혼합물·여러 제품) 2) 성분이 있는 제품이 0개면 401
+  3) 아니면 casno에 CAS 모양(\b\d{2,7}\s*-\s*\d{2}\s*-\s*\d\b, 기존 코드와 같게 양끝 \b)이 하나도 없거나 모든 성분의 casno·percent·component가 비공개 값("비공개", "영업비밀", "", "-", "null", NULL)이면 203
+  4) 아니면 제품 1개·성분 1개면 200
+  - 체크섬(cas_valid)은 쓰지 않는다(기존과 같게). 끝의 \b 때문에 "64742-54-71"이나 엑셀이 날짜로 바꾼 "1964-02-08"은 CAS 모양이 아니다
+- casno: 원문 문자열(여러 개면 "a, b" 한 문자열, 없으면 "", 비공개는 "비공개"). cas_valid는 넣지 않는다
+- 제품명이 없으면 "제품 N", 이름이 겹치면 " (2)"를 붙인다
+- hazard_symbol: 제품마다 ghs_code 중복 없이, GHS07 생략 규칙을 적용한 최종 결과(msds_hazards). symbol_name은 기존 표기(GHS01 폭발하는 폭탄, GHS02 불꽃, GHS03 원 위의 불꽃, GHS04 가스 실린더, GHS05 부식성, GHS06 해골과 X자형 뼈, GHS07 감탄부호, GHS08 건강 유해성, GHS09 환경). image는 그림문자 PNG의 base64(파일을 준비하기 전까지 "")
+- 문서 상태별: done·partial은 있는 결과로 위 규칙 적용(기존도 실패한 부분은 비우고 응답) / failed는 {"status":400,"error"}: 업로드 검증 실패면 그 메시지, 분석 실패(총괄 실행 기록이 있거나 재시작으로 중단)면 "MSDS 문서를 입력하세요." / queued·analyzing·uploaded는 HTTP 409 {"error":"분석 중입니다"} / 문서가 없으면 HTTP 404
+- POST /api/legacy/casNoExtraction(동기식): multipart file(+ companycode, companyname은 받기만 하고 쓰지 않음). 업로드 검증 → 저장 → Analyze → 판정까지 기다린 뒤 legacy 모양으로 응답. 검증 실패는 HTTP 200 {"status":400,"error"}
+  - 목적: 기존 host-runner의 MSDS_AI_URL만 바꿔 결과를 비교한다
+  - 0.5초마다 DB status를 확인해 done·partial·failed를 기다린다. 최대 MSDS_DOC_TIMEOUT_SECS + 10초(총괄 타이머가 Analyze를 받은 뒤 시작하므로 여유). 대기열에서 오래 기다려 넘기면 409 "분석 중입니다"
+  - 그래서 기존 host-runner의 대기 한도(600초)는 MSDS_DOC_TIMEOUT_SECS + 10초보다 길게 두어야 한다(기본값이면 610초 초과)
+
 # 번역 사후 검사 (순수 함수 post_check, 모두 실패가 아니라 경고)
 - 보존 토큰(preserved_tokens, missing_in_translation): 원문 섹션에서 체크섬이 맞는 CAS 번호, H코드(H200~H499, H360Fd는 H360), P코드(P100~P599), 제품명(원문 섹션에 있을 때)을 뽑아 번역문(조각을 이어 붙인 것)에 그대로 있는지 본다
   - ASCII 단어 경계로 찾아 한글 조사가 붙어도("H301을") 인식한다. EUH 코드는 보지 않는다
