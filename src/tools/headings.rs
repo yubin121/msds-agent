@@ -1,32 +1,8 @@
 //! 섹션 제목 후보 찾기와 섹션 본문 자르기 (순수 함수)
 //! 줄 번호는 페이지마다 1부터, `str::lines()` 기준이다. 두 함수가 같은 기준을 써야 한다.
 
-use std::sync::LazyLock;
-
-use regex::Regex;
-
-static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r"(?i)^\s*section\s*(\d{1,2})\b",       // SECTION 3, Section 3:
-        r"^\s*제\s*(\d{1,2})\s*[장항]",           // 제3장
-        r"^\s*(\d{1,2})\s*[.):]\s*[^\d\s.]",     // 3. Composition, 3) 구성 (3.5 같은 소수는 제외)
-        r"^\s*(\d{1,2})\s+[가-힣]",              // 3 구성성분의 명칭
-    ]
-    .iter()
-    .map(|p| Regex::new(p).unwrap())
-    .collect()
-});
-
-/// 제목 후보의 서로 다른 번호가 이보다 적으면 MSDS가 아닌 것으로 본다 (업로드 검증·추출 사전 검사 공용)
-pub const MIN_DISTINCT_HEADINGS: usize = 8;
-
-/// 줄이 섹션 제목처럼 보이면 섹션 번호(1~16)를 돌려준다.
-pub fn heading_number(line: &str) -> Option<u32> {
-    PATTERNS.iter().find_map(|re| {
-        let n: u32 = re.captures(line)?[1].parse().ok()?;
-        (1..=16).contains(&n).then_some(n)
-    })
-}
+/// 제목 후보 판정은 업로드 검증과 같은 규칙이라 msds-validate에 있다
+pub use msds_validate::{heading_number, MIN_DISTINCT_HEADINGS};
 
 /// (page_no, line_no) 위치 목록으로 문서를 잘라 섹션 본문을 만든다.
 /// 각 섹션은 자기 위치(제목 줄 포함)부터 다음 위치 전 줄까지, 마지막은 문서 끝까지다.
@@ -112,28 +88,6 @@ pub fn body_is_empty(section_text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn heading_patterns() {
-        assert_eq!(heading_number("SECTION 3"), Some(3));
-        assert_eq!(heading_number("Section 3: Composition"), Some(3));
-        assert_eq!(heading_number("  section 16 Other information"), Some(16));
-        assert_eq!(heading_number("3. Composition/information on ingredients"), Some(3));
-        assert_eq!(heading_number("3. 구성성분의 명칭 및 함유량"), Some(3));
-        assert_eq!(heading_number("11) 독성에 관한 정보"), Some(11));
-        assert_eq!(heading_number("1 화학제품과 회사에 관한 정보"), Some(1));
-        assert_eq!(heading_number("제2장 유해성·위험성"), Some(2));
-    }
-
-    #[test]
-    fn non_headings() {
-        assert_eq!(heading_number("3.5 mg/kg"), None);
-        assert_eq!(heading_number("17. Extra"), None);
-        assert_eq!(heading_number("0. Zero"), None);
-        assert_eq!(heading_number("Sectional view"), None);
-        assert_eq!(heading_number("Composition"), None);
-        assert_eq!(heading_number("2024. 01. 05"), None);
-    }
 
     #[test]
     fn slices_across_pages() {

@@ -12,7 +12,7 @@ rustup target add wasm32-unknown-unknown   # 처음 한 번
 cargo install trunk                        # 처음 한 번
 trunk serve                                # http://localhost:8080
 ```
-- `/api` 요청은 `Trunk.toml`의 proxy로 서버(8090)에 보낸다(CORS 없음).
+- `/api` 요청은 `Trunk.toml`의 proxy로 Worker(8787)를 거쳐 서버(8090)로 간다(CORS 없음). Worker 없이 쓰려면 8090 줄로 바꾼다.
 - Tailwind CSS는 trunk가 `Trunk.toml`의 `[tools] tailwindcss` 버전(3.4.17)을 처음 빌드할 때 내려받는다.
 
 ## 화면

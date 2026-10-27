@@ -14,6 +14,8 @@ use tower_http::cors::CorsLayer;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+// 요청 본문 한도(21MB)는 Worker도 쓰므로 msds-validate에 있다
+use msds_validate::MAX_BODY_BYTES;
 use pekko_actor::ActorRef;
 use uuid::Uuid;
 
@@ -22,9 +24,6 @@ use crate::{api_view, validate};
 use crate::{db, pdf};
 
 const UPLOAD_DIR: &str = "data/uploads";
-/// 요청 본문 한도. 파일 한도(validate::MAX_UPLOAD_BYTES, 20MB)에 multipart 헤더 여유를 더해
-/// 20MB를 조금 넘는 파일도 413이 아니라 validate_file의 400으로 거른다
-const MAX_BODY_BYTES: usize = 21 * 1024 * 1024;
 const PREVIEW_CHARS: usize = 300;
 
 #[derive(Clone)]

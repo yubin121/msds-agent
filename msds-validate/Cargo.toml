@@ -1,0 +1,8 @@
+[package]
+name = "msds-validate"
+version = "0.1.0"
+edition = "2021"
+description = "업로드 입력 검증 규칙 (서버·Cloudflare Worker 공용, DB·IO 없음)"
+
+[dependencies]
+regex = "1"

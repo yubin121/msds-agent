@@ -4,7 +4,7 @@
 - 혼자 쓰는 로컬 저장소라 main 브랜치에서 바로 작업한다(전역 규칙의 feature 브랜치는 적용하지 않음). 커밋은 사용자가 검증한 뒤에 한다.
 - API 키는 .env에만 둔다. 코드, 로그, 커밋에 키를 넣지 마라.
 - 경로는 상대 경로만 쓴다. Windows와 macOS 모두에서 빌드되어야 한다.
-- 한 단계씩 작업하고, 매 단계 cargo build로 확인한다.
+- 한 단계씩 작업하고, 매 단계 cargo build로 확인한다. 테스트는 cargo test --workspace(서버 + msds-validate)로 돌린다.
 
 # 프로젝트 개요
 MSDS PDF를 기능별 에이전트 액터(추출, 성분, 그림문자, 번역)와 총괄 액터로 분석한다.
@@ -91,8 +91,10 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 순서: %PDF- 시그니처 → 크기 20MB 이하 → 공백 제외 텍스트 200자 이상 → 제목 후보의 서로 다른 섹션 번호 8개 이상
 - 실패하면 문서 행을 status 'failed', error에 이유로 남기고 400 + {"error": 메시지}. PDF가 아니면 파일을 디스크에 저장하지 않는다
   - 메시지: "PDF 파일이 아닙니다", "파일이 20MB를 넘습니다(..MB)", "텍스트가 없는 PDF입니다(스캔본일 수 있음)", "MSDS 문서가 아닌 것으로 보입니다"
-- 검사는 src/validate.rs의 순수 함수(validate_file, validate_text, validate_upload)로만 한다. 다른 런타임(Cloudflare Worker 등)에 같은 규칙으로 옮길 수 있게 DB·IO를 넣지 않는다
-- 추출 에이전트의 사전 검사는 안전장치로 남긴다(기준 MIN_DISTINCT_HEADINGS는 headings.rs 공용)
+- 검사 규칙은 msds-validate 크레이트(순수 함수, DB·IO 없음) 한 곳에만 둔다: validate_file, validate_text, validate_upload, heading_number, non_space_chars, 기준값(MAX_UPLOAD_BYTES, MIN_TEXT_CHARS, MIN_DISTINCT_HEADINGS)과 메시지. 서버(src/validate.rs, tools/headings.rs, pdf.rs)는 다시 내보내기만 하고, Cloudflare Worker(WASM)도 같은 크레이트를 쓴다
+  - 규칙 테스트는 크레이트 안에, 서버 동작 테스트는 서버에 있다. 루트 Cargo.toml이 workspace(members = [".", "msds-validate"])라 cargo test --workspace 하나로 둘 다 돈다(Cargo.lock도 루트 하나). worker·frontend는 각자 독립 workspace
+  - 요청 본문 한도 MAX_BODY_BYTES(21MB)와 Content-Length 검사(validate_content_length)도 이 크레이트에 있다(서버 DefaultBodyLimit와 Worker 공용)
+- 추출 에이전트의 사전 검사는 안전장치로 남긴다(기준 MIN_DISTINCT_HEADINGS는 msds-validate 공용)
 - 저장된 문서 재검사: cargo run -- validate-docs (상태는 바꾸지 않음)
 
 # 그림문자 에이전트 (src/actors/hazards.rs)
@@ -166,8 +168,28 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - 0.5초마다 DB status를 확인해 done·partial·failed를 기다린다. 최대 MSDS_DOC_TIMEOUT_SECS + 10초(총괄 타이머가 Analyze를 받은 뒤 시작하므로 여유). 대기열에서 오래 기다려 넘기면 409 "분석 중입니다"
   - 그래서 기존 host-runner의 대기 한도(600초)는 MSDS_DOC_TIMEOUT_SECS + 10초보다 길게 두어야 한다(기본값이면 610초 초과)
 
+# Cloudflare Worker 앞단 (worker/, workers-rs WASM, 메인 크레이트와 따로 빌드)
+- 로컬 전용: worker-build --release로 빌드하고 npx wrangler@4.149.0 dev --local(8787)로만 실행한다. wrangler 전역 설치, Cloudflare 로그인, wrangler deploy는 하지 않는다. WRANGLER_SEND_METRICS=false
+- worker 0.8.7(=고정), 서버 주소는 wrangler.toml [vars] SERVER_URL(http://127.0.0.1:8090)
+- /api/* 전체를 서버로 넘긴다(메서드·헤더·본문·쿼리 그대로, 응답 그대로). /api 밖은 404
+- 서버에 연결하지 못하면 HTTP 502 {"error":"서버에 연결할 수 없습니다"}, casNoExtraction은 기존 형식 HTTP 200 {"status":500,"error":"서버에 연결할 수 없습니다"}. 서버가 응답한 오류(4xx·5xx)는 그대로 넘긴다
+- 업로드(POST /api/msds/upload, /api/legacy/casNoExtraction) 검사 순서:
+  1) 본문을 읽기 전에 Content-Length가 서버 본문 한도(MAX_BODY_BYTES, 21MB)를 넘으면 바로 크기 오류로 거부(validate_content_length). 헤더가 없거나 숫자가 아니면 2)로 판단
+     - 이유: Worker 메모리는 isolate당 128MB인데 본문은 100MB(Free)까지 들어오고, 본문 검사는 본문과 복제본을 함께 메모리에 올린다
+     - 메시지의 MB는 Content-Length(multipart 헤더 포함) 기준이다
+  2) file 필드에 msds-validate::validate_file(시그니처·크기)
+  - 걸리면 서버로 보내지 않고 서버와 같은 모양으로 응답: 업로드는 HTTP 400 {"error"}, casNoExtraction은 HTTP 200 {"status":400,"error"}
+  - 서버로 보내지 않으므로 DB에 failed 행이 남지 않는다(업로드 검증 규칙 "문서 행을 failed로 남긴다"의 예외). 거부는 Worker 로그에만 남는다
+  - 통과하면 원본 요청을 복제해 그대로 넘긴다(파일 이름 인코딩 등을 바꾸지 않게). file 필드가 없으면 서버가 판단한다
+- 텍스트 검사(공백 제외 200자, 섹션 번호 8개)는 서버에만 둔다. 근거:
+  - CPU 시간: Workers 요청당 CPU 한도는 Free 10ms, Paid 기본 30초(최대 5분)(developers.cloudflare.com/workers/platform/limits, 2026-10-27 확인). 서버의 기본 추출(pdf-extract)만으로도 네이티브 release에서 ATL 6쪽 10.2ms, NO.6 7쪽 40.5ms, V66VC229 13쪽 16.6ms, ARALDITE 51쪽 243.6ms였다. 서버가 먼저 쓰는 좌표 방식은 이보다 일이 많고 WASM은 네이티브보다 느리다
+  - panic 처리: 서버는 PDF 파서의 panic을 catch_unwind로 오류로 바꾸는데(CLAUDE.md 구현 규칙) wasm32에서는 panic이 abort라 잡을 수 없다
+  - 빌드 가능 여부는 이유가 아니다: pdf-extract는 wasm32로 빌드된다(cargo build --target wasm32-unknown-unknown 확인)
+- 직접 서버로 보내면 20MB를 조금 넘는 파일은 validate_file의 400이지만, 21MB 본문 한도를 넘으면 axum이 413("multipart 파싱 오류")을 낸다. Worker를 거치면 크기와 상관없이 400 "파일이 20MB를 넘습니다(..MB)"다(Free 요청 본문 한도 100MB, 60MB 가짜 파일로 확인)
+- 화면 Trunk.toml proxy는 8787(화면 → Worker → 서버). Worker 없이 쓰려면 8090 줄로 바꾼다
+
 # 화면 (frontend/, Yew, 메인 크레이트와 따로 빌드)
-- trunk serve(8080). /api는 Trunk.toml proxy로 서버(8090)에 보낸다(CORS 없음). Tailwind는 trunk 내장(Trunk.toml에 3.4.17 고정)
+- trunk serve(8080). /api는 Trunk.toml proxy로 Worker(8787)를 거쳐 서버(8090)로 간다(CORS 없음). Tailwind는 trunk 내장(Trunk.toml에 3.4.17 고정)
 - 의존 버전은 Cargo.toml에 =로 고정(yew 0.21.0, yew-router 0.18.0, gloo-net 0.6.0, gloo-timers 0.3.0)
 - 파일은 snake_case(Rust 관례), 컴포넌트 함수는 PascalCase, 한 파일에 컴포넌트 하나(src/components/). 전역 상태 라이브러리는 쓰지 않는다(선택한 문서는 라우트로 전달)
 - 목록은 3초마다, 상세는 queued·analyzing일 때만 3초마다 다시 불러온다

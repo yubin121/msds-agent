@@ -8,8 +8,8 @@ tailwindcss = "3.4.17"
 [serve]
 port = 8080
 
-# API는 서버(8090)로 보낸다(CORS 없이)
+# API는 Worker(8787)를 거쳐 서버로 간다: 화면 → Worker(업로드 파일 검사) → 서버(8090). CORS 없음
 [[proxy]]
-backend = "http://localhost:8090/api/"
-# 10-3: Worker로 바꾸면 화면 → Worker(8787) → 서버
-# backend = "http://localhost:8787/api/"
+backend = "http://localhost:8787/api/"
+# Worker 없이 서버로 바로 보내려면 위 줄 대신:
+# backend = "http://localhost:8090/api/"

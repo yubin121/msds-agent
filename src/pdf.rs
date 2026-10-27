@@ -7,8 +7,8 @@
 use pdf_extract::{Document, MediaBox, OutputDev, OutputError, Transform};
 
 /// 공백을 뺀 글자 수가 이보다 적으면 텍스트가 없는 PDF로 본다
-pub const MIN_TEXT_CHARS: usize = 200;
-pub const NO_TEXT_ERROR: &str = "텍스트가 없는 PDF입니다(스캔본일 수 있음)";
+/// 글자 수 기준과 메시지는 업로드 검증과 같은 값이라 msds-validate에 있다
+pub use msds_validate::{non_space_chars, MIN_TEXT_CHARS, NO_TEXT_ERROR};
 
 pub struct Extracted {
     pub pages: Vec<String>,
@@ -44,11 +44,6 @@ pub async fn extract_pages(bytes: Vec<u8>) -> Result<Extracted, String> {
         Ok(result) => result,
         Err(e) => Err(format!("추출 작업 실행 실패: {e}")),
     }
-}
-
-/// 공백(공백·줄바꿈·탭 등)을 뺀 글자 수
-pub fn non_space_chars(pages: &[String]) -> usize {
-    pages.iter().map(|p| p.chars().filter(|c| !c.is_whitespace()).count()).sum()
 }
 
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {

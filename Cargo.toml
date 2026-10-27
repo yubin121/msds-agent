@@ -3,6 +3,10 @@ name = "msds-agent"
 version = "0.1.0"
 edition = "2021"
 
+# 서버와 검사 규칙 크레이트를 함께 테스트한다(cargo test --workspace). worker·frontend는 각자 독립 workspace
+[workspace]
+members = [".", "msds-validate"]
+
 [dependencies]
 pekko-actor       = { path = "../rust-pekko/pekko-actor" }
 pekko-agent-core  = { path = "../pekko-agent/crates/pekko-agent-core" }
@@ -24,3 +28,4 @@ tower-http = { version = "0.6", features = ["cors"] }
 encoding_rs = "0.8"
 regex = "1"
 base64 = "=0.22.1"
+msds-validate = { path = "msds-validate" }

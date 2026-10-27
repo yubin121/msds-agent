@@ -3,3 +3,6 @@ target/
 data/
 frontend/dist/
 .playwright-mcp/
+worker/build/
+worker/.wrangler/
+node_modules/

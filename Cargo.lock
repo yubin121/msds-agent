@@ -1305,6 +1305,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "encoding_rs",
+ "msds-validate",
  "pdf-extract",
  "pekko-actor",
  "pekko-agent-core",
@@ -1319,6 +1320,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "msds-validate"
+version = "0.1.0"
+dependencies = [
+ "regex",
 ]
 
 [[package]]
