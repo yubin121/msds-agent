@@ -105,9 +105,9 @@ pub fn parse_concurrency(raw: Option<&str>) -> usize {
 }
 
 // 영어 원문에서 찾는다. ASCII 단어 경계라 한글 조사와 붙어 있어도("H301을") 찾는다
-static CAS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)\d{2,7}-\d{2}-\d(?-u:\b)").unwrap());
+pub(crate) static CAS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)\d{2,7}-\d{2}-\d(?-u:\b)").unwrap());
 // H200~H499, P100~P599. "H360Fd"는 H360으로 본다. EUH 코드는 제외(앞이 U라 경계가 아님)
-static CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)(?:H[2-4]\d{2}|P[1-5]\d{2})").unwrap());
+pub(crate) static CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)(?:H[2-4]\d{2}|P[1-5]\d{2})").unwrap());
 
 /// 번역문에 그대로 남아야 하는 원문 토큰: 체크섬이 맞는 CAS 번호, H·P 코드, 제품명(원문에 있을 때)
 pub fn preserved_tokens(original: &str, product_name: Option<&str>) -> Vec<String> {
@@ -193,6 +193,16 @@ pub fn post_check(original: &str, translated: &str, product_name: Option<&str>) 
         out.push(format!("원문에 없는 한자·가나: {}", cjk.iter().map(char::to_string).collect::<Vec<_>>().join(" ")));
     }
     out
+}
+
+/// 사후 검사 경고가 난 조각을 한 번 다시 번역했을 때 저장할 결과: 다시 번역한 것의 경고가 더 적을 때만 바꾼다.
+/// (번역문, 경고)와 다시 번역한 것을 채택했는지를 돌려준다
+pub fn pick_translation(original: (String, Vec<String>), retry: (String, Vec<String>)) -> (String, Vec<String>, bool) {
+    if retry.1.len() < original.1.len() {
+        (retry.0, retry.1, true)
+    } else {
+        (original.0, original.1, false)
+    }
 }
 
 /// 머리말·꼬리말 비교용 정규화: 숫자 묶음을 #로, 공백을 한 칸으로 ("Page 2 of 6" → "Page # of #")
@@ -345,7 +355,21 @@ struct SectionRun {
     input_tokens: u32,
     output_tokens: u32,
     max_tokens_stops: u32,
+    /// 사후 검사 경고로 다시 번역한 조각 수와 그중 다시 번역한 것을 채택한 수
+    retries: u32,
+    retries_used: u32,
     error: Option<String>,
+}
+
+impl SectionRun {
+    fn count_call(&mut self, call: &crate::tool_loop::SingleCall) {
+        self.rounds += 1;
+        self.input_tokens += call.input_tokens;
+        self.output_tokens += call.output_tokens;
+        if call.stop_reason == "max_tokens" {
+            self.max_tokens_stops += 1;
+        }
+    }
 }
 
 pub async fn run(
@@ -414,6 +438,7 @@ pub async fn run(
 
     let mut outcome = JobOutcome { ok: true, error: None, rounds: 0, input_tokens: 0, output_tokens: 0 };
     let mut warnings = Vec::new();
+    let (mut retries, mut retries_used) = (0, 0);
     while let Some(joined) = set.join_next().await {
         let r = match joined {
             Ok(r) => r,
@@ -425,6 +450,8 @@ pub async fn run(
         outcome.rounds += r.rounds;
         outcome.input_tokens += r.input_tokens;
         outcome.output_tokens += r.output_tokens;
+        retries += r.retries;
+        retries_used += r.retries_used;
         if r.max_tokens_stops > 0 {
             warnings.push(format!(
                 "제품 {} {}번: max_tokens로 잘린 응답 {}회",
@@ -434,6 +461,10 @@ pub async fn run(
         if let Some(e) = r.error {
             warnings.push(format!("제품 {} {}번: {e}", r.product_no, r.section_no));
         }
+    }
+
+    if retries > 0 {
+        warnings.push(format!("사후 검사 경고로 다시 번역한 조각 {retries}개(다시 번역한 것 채택 {retries_used}개)"));
     }
 
     // 성공 판정과 사후 검사는 DB에 저장된 결과로 한다
@@ -463,6 +494,8 @@ async fn translate_section(
         input_tokens: 0,
         output_tokens: 0,
         max_tokens_stops: 0,
+        retries: 0,
+        retries_used: 0,
         error: None,
     };
     // 조각 수가 줄면 옛 조각이 남으므로 섹션 번역을 먼저 지운다
@@ -498,20 +531,40 @@ async fn translate_section(
             String::new()
         } else {
             info!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, "번역 조각 시작");
-            match translate_chunk(client, &job, source, i, total).await {
+            let text = match translate_chunk(client, &job, source, i, total).await {
                 Ok((text, call)) => {
-                    run.rounds += 1;
-                    run.input_tokens += call.input_tokens;
-                    run.output_tokens += call.output_tokens;
-                    if call.stop_reason == "max_tokens" {
-                        run.max_tokens_stops += 1;
-                    }
+                    run.count_call(&call);
                     text
                 }
                 Err(e) => {
                     warn!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, "번역 실패: {e}");
                     run.error = Some(format!("조각 {i}: {e}"));
                     break;
+                }
+            };
+            // 사후 검사 경고(한자 혼입, 보존 토큰 빠짐 등)가 나면 한 번만 다시 번역한다. 새 조각과 같은 마감 규칙
+            let warnings = post_check(source, &text, job.product_name.as_deref());
+            if warnings.is_empty() || past_deadline(deadline) {
+                text
+            } else {
+                run.retries += 1;
+                info!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, ?warnings, "사후 검사 경고로 조각을 다시 번역");
+                match translate_chunk(client, &job, source, i, total).await {
+                    Ok((retry, call)) => {
+                        run.count_call(&call);
+                        let retry_warnings = post_check(source, &retry, job.product_name.as_deref());
+                        let (text, left, used) = pick_translation((text, warnings), (retry, retry_warnings));
+                        if used {
+                            run.retries_used += 1;
+                        }
+                        info!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, used, ?left, "다시 번역 결과");
+                        text
+                    }
+                    // 다시 번역이 실패하면 처음 번역을 쓴다(경고는 사후 검사에 그대로 남는다)
+                    Err(e) => {
+                        warn!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, "다시 번역 실패: {e}");
+                        text
+                    }
                 }
             }
         };
@@ -742,6 +795,21 @@ mod tests {
         // ARALDITE: 제품 2가 29쪽에서 시작 → 경계 페이지는 양쪽에
         assert_eq!(product_page_ranges(&[(1, 1), (2, 29)], 51), [(1, 1..=29), (2, 29..=51)]);
         assert!(product_page_ranges(&[], 5).is_empty());
+    }
+
+    #[test]
+    fn retry_kept_only_when_fewer_warnings() {
+        let w = |n: usize| (0..n).map(|i| format!("경고 {i}")).collect::<Vec<_>>();
+        let first = || ("처음".to_string(), w(1));
+        // 다시 번역한 것의 경고가 적으면 채택
+        assert_eq!(pick_translation(first(), ("다시".into(), w(0))), ("다시".into(), w(0), true));
+        // 같거나 많으면 처음 것
+        assert_eq!(pick_translation(first(), ("다시".into(), w(1))), ("처음".into(), w(1), false));
+        assert_eq!(pick_translation(first(), ("다시".into(), w(2))), ("처음".into(), w(1), false));
+        // 한자 경고가 사라지고 다른 경고 하나가 남아도 수가 같으면 처음 것
+        let original = ("가".to_string(), vec!["원문에 없는 한자·가나: 吸".to_string()]);
+        let retry = ("나".to_string(), vec!["번역문에 없음: H302".to_string()]);
+        assert!(!pick_translation(original, retry).2);
     }
 
     #[test]

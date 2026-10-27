@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "dev": "npx wrangler@4.149.0 dev --local"
+  }
+}

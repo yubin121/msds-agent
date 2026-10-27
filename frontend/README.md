@@ -7,6 +7,9 @@ MSDS 분석 결과 화면 (Yew, WASM). 메인 크레이트와 따로 빌드한�
 # 서버 먼저 (저장소 루트)
 cargo run
 
+# Worker (저장소 루트에서, 8787)
+cd worker && npm run dev
+
 # 화면 (이 폴더)
 rustup target add wasm32-unknown-unknown   # 처음 한 번
 cargo install trunk                        # 처음 한 번

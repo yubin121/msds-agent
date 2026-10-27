@@ -1,4 +1,5 @@
-# 로컬 전용: npx wrangler@4.149.0 dev 로만 실행한다(로그인·배포 안 함)
+# 로컬 전용: cd worker && npm run dev 로만 실행한다(로그인·배포 안 함)
+send_metrics = false
 name = "msds-worker"
 main = "build/index.js"
 compatibility_date = "2026-10-01"

@@ -4,6 +4,7 @@ mod api;
 mod api_view;
 mod cost;
 mod db;
+mod measure;
 mod pdf;
 mod pipeline_test;
 mod prompts;
@@ -22,9 +23,9 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str);
 
-    // tool-test, reextract, validate-docs는 LLM을 쓰지 않으므로 CLAUDE_MODEL 검사를 건너뛴다
+    // tool-test, reextract, validate-docs, measure는 LLM을 쓰지 않으므로 CLAUDE_MODEL 검사를 건너뛴다
     let model = std::env::var("CLAUDE_MODEL").unwrap_or_default();
-    if !matches!(command, Some("tool-test" | "reextract" | "validate-docs")) && model.trim().is_empty() {
+    if !matches!(command, Some("tool-test" | "reextract" | "validate-docs" | "measure")) && model.trim().is_empty() {
         tracing::error!("CLAUDE_MODEL이 비어 있습니다. .env를 확인하세요");
         std::process::exit(1);
     }
@@ -78,6 +79,14 @@ async fn main() {
             }
             return;
         }
+        // cargo run -- measure <cost|report> ... : Step 11 실측 (DB만 읽는다)
+        Some("measure") => {
+            if let Err(e) = measure::run(pool, &args[1..]).await {
+                tracing::error!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         // cargo run -- tool-test <툴이름> '<JSON>' | @파일.json : LLM 없이 툴 하나만 실행
         Some("tool-test") => {
             let (Some(name), Some(raw)) = (args.get(1), args.get(2)) else {
@@ -107,7 +116,7 @@ async fn main() {
             return;
         }
         Some(other) => {
-            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, pipeline-test, tool-test, validate-docs, reextract 또는 인자 없이 서버 실행)");
+            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, pipeline-test, measure, tool-test, validate-docs, reextract 또는 인자 없이 서버 실행)");
             std::process::exit(2);
         }
         None => {}

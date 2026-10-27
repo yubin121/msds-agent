@@ -123,6 +123,11 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 실행 기록 rounds는 Claude 호출 수
 - 성공 판정: 대상 섹션 중 원문에 있는 섹션이 모두 저장되면 ok. 빠지면 ok=false, error에 섹션 번호
 - 경고(실패 아님, 실행 기록 error에 남김): 사후 검사 결과, stop_reason이 max_tokens인 응답, 섹션 번역 오류
+- 조각 다시 번역(Step 11 보완): 조각을 번역한 직후 그 조각에 post_check를 하고, 경고가 있으면 한 번만 다시 번역한다
+  - 다시 번역한 것의 경고 수가 더 적을 때만 그것을 저장하고, 같거나 많으면 처음 것을 저장한다(pick_translation). 다시 번역 호출이 실패해도 처음 것을 쓴다
+  - 마감이 지났으면 다시 번역하지 않는다(새 조각과 같은 규칙). 저장 직전 마감 검사도 그대로
+  - 실행 기록 error에 "사후 검사 경고로 다시 번역한 조각 N개(다시 번역한 것 채택 M개)"를 남기고, 남은 경고는 지금처럼 섹션 단위 사후 검사로 남긴다
+  - 근거: Step 11에서 Sonnet도 10건 중 2건(NYCOTE88 7번 "吸入", V66VC229 5번 "给")에 한자가 섞였다
 
 # 총괄 액터 (src/actors/supervisor.rs, LLM 호출 없음)
 - 메시지: Analyze { doc_id }, AgentDone(From<AgentDone>), Timeout { doc_id, run_id }
@@ -169,7 +174,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - 그래서 기존 host-runner의 대기 한도(600초)는 MSDS_DOC_TIMEOUT_SECS + 10초보다 길게 두어야 한다(기본값이면 610초 초과)
 
 # Cloudflare Worker 앞단 (worker/, workers-rs WASM, 메인 크레이트와 따로 빌드)
-- 로컬 전용: worker-build --release로 빌드하고 npx wrangler@4.149.0 dev --local(8787)로만 실행한다. wrangler 전역 설치, Cloudflare 로그인, wrangler deploy는 하지 않는다. WRANGLER_SEND_METRICS=false
+- 로컬 전용: cd worker && npm run dev(8787)로만 실행한다(package.json 스크립트가 npx wrangler@4.149.0 dev --local을 부르고, 빌드는 wrangler.toml의 worker-build --release). 의존성은 넣지 않는다. 통계 전송은 wrangler.toml의 send_metrics = false로 끈다. wrangler 전역 설치, Cloudflare 로그인, wrangler deploy는 하지 않는다
 - worker 0.8.7(=고정), 서버 주소는 wrangler.toml [vars] SERVER_URL(http://127.0.0.1:8090)
 - /api/* 전체를 서버로 넘긴다(메서드·헤더·본문·쿼리 그대로, 응답 그대로). /api 밖은 404
 - 서버에 연결하지 못하면 HTTP 502 {"error":"서버에 연결할 수 없습니다"}, casNoExtraction은 기존 형식 HTTP 200 {"status":500,"error":"서버에 연결할 수 없습니다"}. 서버가 응답한 오류(4xx·5xx)는 그대로 넘긴다
