@@ -1,6 +1,6 @@
 # 작업 규칙
 - ../pekko-agent, ../rust-pekko 폴더는 읽기 전용이다. 어떤 파일도 수정·생성·삭제하지 마라.
-- git push, git remote add는 금지다. 이 프로젝트는 로컬 전용이다.
+- push와 원격 저장소 설정은 사용자가 직접 한다. Claude Code는 push·remote 추가를 하지 않는다.
 - 혼자 쓰는 로컬 저장소라 main 브랜치에서 바로 작업한다(전역 규칙의 feature 브랜치는 적용하지 않음). 커밋은 사용자가 검증한 뒤에 한다.
 - API 키는 .env에만 둔다. 코드, 로그, 커밋에 키를 넣지 마라.
 - 경로는 상대 경로만 쓴다. Windows와 macOS 모두에서 빌드되어야 한다.
@@ -42,7 +42,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - LlmConfig: timeout_secs 120 이상, temperature None, max_tokens는 에이전트별로 지정(번역 8192 이상)
 - CLAUDE_MODEL이 비어 있으면 서버 시작 시 오류로 종료한다
 - PDF 추출은 spawn_blocking 안에서 하고, panic은 오류로 바꿔 저장한다
-- PDF 텍스트는 좌표 기준으로 줄을 정렬한다(기존 서비스 hybrid_extract.py와 같은 방식)
+- PDF 텍스트는 좌표 기준으로 줄을 정렬한다(기존 서비스의 좌표 기반 추출과 같은 방식)
   - 줄 안은 글자가 아니라 덩어리(그린 순서에서 이어지는 글자들) 단위로 x 정렬한다. 폰트 폭 정보가 틀린 PDF가 있어 글자 단위로 정렬하면 옆 칸과 섞인다
   - 좌표 방식이 실패하거나 결과가 비면 기본 추출(extract_text_from_mem_by_pages)로 대신한다
   - 공백을 뺀 글자 수 합이 200 미만이면 status='failed', error="텍스트가 없는 PDF입니다(스캔본일 수 있음)"
@@ -85,9 +85,9 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - .env의 CLAUDE_MODEL_EXTRACT, CLAUDE_MODEL_COMPONENTS, CLAUDE_MODEL_HAZARDS, CLAUDE_MODEL_TRANSLATE. 비어 있으면 CLAUDE_MODEL
 - AgentActor::from_env가 에이전트마다 자기 모델로 ClaudeClient를 만든다. 시작 로그에 에이전트별 모델 이름을 출력한다(키는 출력 금지)
 - msds_agent_runs.model에 실행마다 모델을 저장한다
-- 번역 모델은 Sonnet(claude-sonnet-5-5). 근거: 10/26 같은 시험(ATL 전체, ARALDITE 11번)을 두 모델로 비교했을 때 Haiku는 한자 혼입("経피"), 지시문에 대한 혼잣말이 번역문에 섞임, 페이지 꼬리말 삭제가 남았다. Sonnet은 2배쯤 느리지만 이 문제가 없었다
+- 번역 모델은 Sonnet(claude-sonnet-5-5). 근거: 10/26 같은 시험(영문 6쪽 문서 전체, 영문 51쪽·제품 2개 문서 11번 섹션)을 두 모델로 비교했을 때 Haiku는 한자 혼입("経피"), 지시문에 대한 혼잣말이 번역문에 섞임, 페이지 꼬리말 삭제가 남았다. Sonnet은 2배쯤 느리지만 이 문제가 없었다
 
-# 업로드 검증 (재시도 대신 입력 검증, 근거: 10/26 소장님 피드백)
+# 업로드 검증 (재시도 대신 입력 검증: 분석이 실패한 뒤 다시 시도하기보다 입력 단계에서 거른다)
 - 순서: %PDF- 시그니처 → 크기 20MB 이하 → 공백 제외 텍스트 200자 이상 → 제목 후보의 서로 다른 섹션 번호 8개 이상
 - 실패하면 문서 행을 status 'failed', error에 이유로 남기고 400 + {"error": 메시지}. PDF가 아니면 파일을 디스크에 저장하지 않는다
   - 메시지: "PDF 파일이 아닙니다", "파일이 20MB를 넘습니다(..MB)", "텍스트가 없는 PDF입니다(스캔본일 수 있음)", "MSDS 문서가 아닌 것으로 보입니다"
@@ -105,7 +105,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 
 # 번역 에이전트 (src/actors/translate.rs)
 - language가 ko면 Claude를 부르지 않고 ok=true, 실행 기록 error에 "한글 문서라 번역 생략"
-- 툴 루프를 쓰지 않는다. 읽기·저장 순서에 판단이 필요 없는 단계라서다(근거: 툴 루프로 하면 섹션마다 3라운드씩 시스템 프롬프트와 툴 정의가 다시 들어가 입력 토큰이 원문의 약 10배였다. ATL 112,695 → 직접 호출 17,093)
+- 툴 루프를 쓰지 않는다. 읽기·저장 순서에 판단이 필요 없는 단계라서다(근거: 툴 루프로 하면 섹션마다 3라운드씩 시스템 프롬프트와 툴 정의가 다시 들어가 입력 토큰이 원문의 약 10배였다. 영문 6쪽 문서 112,695 → 직접 호출 17,093)
 - 코드가 msds_sections에서 본문을 읽어 split_chunks(순수 함수)로 나눈다: 6000자 안에서 마지막 줄바꿈 뒤에서 자르고, 줄바꿈이 없으면 6000자에서 자른다
 - 조각마다 Claude를 tools 없이 한 번 부르고(tool_loop::call_once), 응답 텍스트를 msds_save_translation과 같은 저장 로직(save_translation::save_chunk)으로 chunk_no 0부터 저장한다
 - (제품, 섹션) 단위로 동시 실행(MSDS_TRANSLATE_CONCURRENCY), 섹션 안의 조각은 차례로. 시작 전에 그 섹션의 기존 번역을 지우고, 조각 하나라도 실패하면 그 섹션 번역을 지워 빠진 섹션으로 잡히게 한다
@@ -116,8 +116,8 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 한글과 라틴 문자만 쓴다(한자·가나 금지). 원문의 화학식·단위·코드는 그대로
 - 페이지 머리말·꼬리말은 번역 입력에서 뺀다(근거: 두 모델 모두 페이지 경계에서 꼬리말을 지우거나 문장을 중복했다). msds_sections·msds_pages 원문은 바꾸지 않는다
   - 찾기(순수 함수 find_page_furniture): 페이지마다 맨 위·맨 아래 8줄(빈 줄 제외)을 후보로, 숫자 묶음을 #로 바꾸고 공백을 정리해(normalize_edge_line) 페이지 수의 절반 이상(최소 3페이지)에 나오는 줄
-  - 제품마다 따로 센다(product_page_ranges: 그 제품의 첫 섹션 페이지부터 다음 제품의 첫 페이지까지). 다중 제품 문서는 제품마다 머리말이 달라 문서 전체로 세면 절반에 못 미친다(ARALDITE RESIN 28쪽, HARDENER 23쪽 / 51쪽)
-  - 8줄인 이유: ARALDITE 머리말이 7줄이라 4줄로는 "Version…", "Print Date" 줄이 빠졌다
+  - 제품마다 따로 센다(product_page_ranges: 그 제품의 첫 섹션 페이지부터 다음 제품의 첫 페이지까지). 다중 제품 문서는 제품마다 머리말이 달라 문서 전체로 세면 절반에 못 미친다(영문 51쪽·제품 2개 문서: 제품 1 28쪽, 제품 2 23쪽)
+  - 8줄인 이유: 그 51쪽 문서의 머리말이 7줄이라 4줄로는 "Version…", "Print Date" 줄이 빠졌다
   - 빼기(strip_furniture): 정규화한 줄 전체가 같을 때만 뺀다. 조각 0의 제목 줄을 뺀 뒤에 적용한다
 - 표 머리글도 번역한다(Health Flammability Reactivity → 건강 인화성 반응성). 표의 행은 합치지 않는다
 - 실행 기록 rounds는 Claude 호출 수
@@ -127,7 +127,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - 다시 번역한 것의 경고 수가 더 적을 때만 그것을 저장하고, 같거나 많으면 처음 것을 저장한다(pick_translation). 다시 번역 호출이 실패해도 처음 것을 쓴다
   - 마감이 지났으면 다시 번역하지 않는다(새 조각과 같은 규칙). 저장 직전 마감 검사도 그대로
   - 실행 기록 error에 "사후 검사 경고로 다시 번역한 조각 N개(다시 번역한 것 채택 M개)"를 남기고, 남은 경고는 지금처럼 섹션 단위 사후 검사로 남긴다
-  - 근거: Step 11에서 Sonnet도 10건 중 2건(NYCOTE88 7번 "吸入", V66VC229 5번 "给")에 한자가 섞였다
+  - 근거: Step 11에서 Sonnet도 10건 중 2건(영문 14쪽 문서 7번 "吸入", 영문 13쪽·제품 3개 문서 5번 "给")에 한자가 섞였다
 
 # 총괄 액터 (src/actors/supervisor.rs, LLM 호출 없음)
 - 메시지: Analyze { doc_id }, AgentDone(From<AgentDone>), Timeout { doc_id, run_id }
@@ -142,7 +142,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - run_id가 지금 실행 중인 것과 다른 AgentDone·Timeout(판정 뒤 늦게 온 것, 이전 실행의 것)은 상태를 바꾸지 않고 로그만 남긴다
 - 시간 초과 뒤에도 일하는 에이전트가 있으면, 그 에이전트들이 끝날 때까지 같은 문서의 새 분석은 대기열에서 기다린다(이전 실행이 새 결과를 지우거나 덮지 않게)
 - 이미 분석 중이거나 대기 중인 doc_id의 Analyze는 무시하고 로그만 남긴다
-- 동시 분석: MSDS_MAX_CONCURRENT_DOCS(기본 3, 1~10). 넘으면 대기열, 하나가 끝나면 다음을 시작한다. 근거: 기존 host-runner의 "한 번에 최대 3건"
+- 동시 분석: MSDS_MAX_CONCURRENT_DOCS(기본 3, 1~10). 넘으면 대기열, 하나가 끝나면 다음을 시작한다. 근거: 기존 클라이언트의 "한 번에 최대 3건"
 - 재시작 복구: 서버 시작 때 status가 analyzing·queued인 문서를 failed(error "서버 재시작으로 중단")로 바꾼다. 액터 상태는 메모리에만 있어 이어서 할 수 없기 때문이다
 - API: 업로드 검증·저장이 성공하면 status 'queued'로 저장하고 Analyze를 tell, 바로 응답(status "queued"). POST /api/msds/:id/analyze는 재분석(202, 없는 문서 404, analyzing·queued면 409)
 - 비용: src/cost.rs의 단가 표(100만 토큰당 USD, claude-sonnet-5-5 입력 2 / 출력 10, claude-haiku-5-5 0.1 / 0.5). 표에 없는 모델은 비용을 비운다
@@ -156,7 +156,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - pictograms의 symbol_name은 msds_hazards.symbol_name이 아니라 ghs_code로 tools/ghs.rs의 PICTOGRAMS에서 찾는다(이름표를 바꾸기 전에 저장된 행도 같은 이름이 나오게)
 - 번역 텍스트는 상세 API에만 있다. legacy 응답의 translation_mono·dual은 항상 ""다(번역 PDF를 만들지 않음)
 
-# legacy 응답 (기존 서비스 5001 호환, 원본 코드 기준)
+# legacy 응답 (기존 서비스 호환, 원본 코드 기준)
 - GET /api/msds/:id/legacy, POST /api/legacy/casNoExtraction이 같은 모양으로 응답한다
 - 모양: { status, product: {"<제품명>": [{component, percent, casno}]}, hazard_symbol: [{image, ghs_code, symbol_name, product_name}] 또는 그림문자가 없으면 "", translation_mono: "", translation_dual: "" }
 - status는 본문 필드에만 넣고 HTTP는 200이다. status는 진행 상태가 아니라 결과의 종류다. 판정 순서(legacy_status):
@@ -169,9 +169,9 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - hazard_symbol: 제품마다 ghs_code 중복 없이, GHS07 생략 규칙을 적용한 최종 결과(msds_hazards). symbol_name은 기존 표기이고, 이름표는 tools/ghs.rs의 PICTOGRAMS 한 곳뿐이다(툴 결과·DB·상세 API·legacy·화면 공용)(GHS01 폭발하는 폭탄, GHS02 불꽃, GHS03 원 위의 불꽃, GHS04 가스 실린더, GHS05 부식성, GHS06 해골과 X자형 뼈, GHS07 감탄부호, GHS08 건강 유해성, GHS09 환경). image는 그림문자 PNG(frontend/assets/ghs/GHSnn.png)의 base64
 - 문서 상태별: done·partial은 있는 결과로 위 규칙 적용(기존도 실패한 부분은 비우고 응답) / failed는 {"status":400,"error"}: 업로드 검증 실패면 그 메시지, 분석 실패(총괄 실행 기록이 있거나 재시작으로 중단)면 "MSDS 문서를 입력하세요." / queued·analyzing·uploaded는 HTTP 409 {"error":"분석 중입니다"} / 문서가 없으면 HTTP 404
 - POST /api/legacy/casNoExtraction(동기식): multipart file(+ companycode, companyname은 받기만 하고 쓰지 않음). 업로드 검증 → 저장 → Analyze → 판정까지 기다린 뒤 legacy 모양으로 응답. 검증 실패는 HTTP 200 {"status":400,"error"}
-  - 목적: 기존 host-runner의 MSDS_AI_URL만 바꿔 결과를 비교한다
+  - 목적: 기존 클라이언트의 서비스 주소 설정만 바꿔 결과를 비교한다
   - 0.5초마다 DB status를 확인해 done·partial·failed를 기다린다. 최대 MSDS_DOC_TIMEOUT_SECS + 10초(총괄 타이머가 Analyze를 받은 뒤 시작하므로 여유). 대기열에서 오래 기다려 넘기면 409 "분석 중입니다"
-  - 그래서 기존 host-runner의 대기 한도(600초)는 MSDS_DOC_TIMEOUT_SECS + 10초보다 길게 두어야 한다(기본값이면 610초 초과)
+  - 그래서 기존 클라이언트의 대기 한도는 MSDS_DOC_TIMEOUT_SECS + 10초보다 길게 두어야 한다(기본값이면 610초 초과. 현재 값은 CLAUDE.local.md)
 
 # Cloudflare Worker 앞단 (worker/, workers-rs WASM, 메인 크레이트와 따로 빌드)
 - 로컬 전용: cd worker && npm run dev(8787)로만 실행한다(package.json 스크립트가 npx wrangler@4.149.0 dev --local을 부르고, 빌드는 wrangler.toml의 worker-build --release). 의존성은 넣지 않는다. 통계 전송은 wrangler.toml의 send_metrics = false로 끈다. wrangler 전역 설치, Cloudflare 로그인, wrangler deploy는 하지 않는다
@@ -187,7 +187,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
   - 서버로 보내지 않으므로 DB에 failed 행이 남지 않는다(업로드 검증 규칙 "문서 행을 failed로 남긴다"의 예외). 거부는 Worker 로그에만 남는다
   - 통과하면 원본 요청을 복제해 그대로 넘긴다(파일 이름 인코딩 등을 바꾸지 않게). file 필드가 없으면 서버가 판단한다
 - 텍스트 검사(공백 제외 200자, 섹션 번호 8개)는 서버에만 둔다. 근거:
-  - CPU 시간: Workers 요청당 CPU 한도는 Free 10ms, Paid 기본 30초(최대 5분)(developers.cloudflare.com/workers/platform/limits, 2026-10-27 확인). 서버의 기본 추출(pdf-extract)만으로도 네이티브 release에서 ATL 6쪽 10.2ms, NO.6 7쪽 40.5ms, V66VC229 13쪽 16.6ms, ARALDITE 51쪽 243.6ms였다. 서버가 먼저 쓰는 좌표 방식은 이보다 일이 많고 WASM은 네이티브보다 느리다
+  - CPU 시간: Workers 요청당 CPU 한도는 Free 10ms, Paid 기본 30초(최대 5분)(developers.cloudflare.com/workers/platform/limits, 2026-10-27 확인). 서버의 기본 추출(pdf-extract)만으로도 네이티브 release에서 영문 6쪽 문서 10.2ms, 한글 7쪽 문서 40.5ms, 영문 13쪽 문서 16.6ms, 영문 51쪽 문서 243.6ms였다. 서버가 먼저 쓰는 좌표 방식은 이보다 일이 많고 WASM은 네이티브보다 느리다
   - panic 처리: 서버는 PDF 파서의 panic을 catch_unwind로 오류로 바꾸는데(CLAUDE.md 구현 규칙) wasm32에서는 panic이 abort라 잡을 수 없다
   - 빌드 가능 여부는 이유가 아니다: pdf-extract는 wasm32로 빌드된다(cargo build --target wasm32-unknown-unknown 확인)
 - 직접 서버로 보내면 20MB를 조금 넘는 파일은 validate_file의 400이지만, 21MB 본문 한도를 넘으면 axum이 413("multipart 파싱 오류")을 낸다. Worker를 거치면 크기와 상관없이 400 "파일이 20MB를 넘습니다(..MB)"다(Free 요청 본문 한도 100MB, 60MB 가짜 파일로 확인)

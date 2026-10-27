@@ -6,3 +6,4 @@ frontend/dist/
 worker/build/
 worker/.wrangler/
 node_modules/
+CLAUDE.local.md

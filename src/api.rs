@@ -340,7 +340,7 @@ async fn detail(State(st): State<AppState>, Path(id): Path<Uuid>) -> Result<Json
     Ok(Json(body))
 }
 
-/// 기존 서비스(5001)와 같은 모양의 응답
+/// 기존 서비스와 같은 모양의 응답
 async fn legacy(State(st): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
     legacy_response(&st.pool, id).await.map(Json)
 }
@@ -368,7 +368,7 @@ async fn legacy_response(pool: &PgPool, id: Uuid) -> Result<Value, ApiError> {
     }
 }
 
-/// 기존 host-runner 호환(동기식): 업로드 → 분석 → 판정까지 기다린 뒤 legacy 모양으로 응답한다.
+/// 기존 클라이언트 호환(동기식): 업로드 → 분석 → 판정까지 기다린 뒤 legacy 모양으로 응답한다.
 /// companycode·companyname은 기존처럼 받지만 쓰지 않는다(기존은 통계 저장용)
 async fn legacy_extract(State(st): State<AppState>, multipart: Multipart) -> Result<Json<Value>, ApiError> {
     let doc = match receive_upload(&st, multipart).await {

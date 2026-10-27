@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn eu_index_number_is_not_cas() {
-        // ARALDITE p.3: CAS 1675-54-3 옆의 EC 번호 216-823-5, EU 색인번호 603-073-00-2
+        // 51쪽 다중 제품 문서 p.3: CAS 1675-54-3 옆의 EC 번호 216-823-5, EU 색인번호 603-073-00-2
         let n = norm(&[(3, 9, "bis(4,1- 1675-54-3  Skin Irrit. 2"), (3, 10, "bisoxir 216-823-5"), (3, 11, "ane  603-073-00-2  Skin Sens. 1")]);
         let found: Vec<String> = cas_in_text(&n).into_iter().map(|(c, _)| c).collect();
         assert_eq!(found, vec!["1675-54-3"]);

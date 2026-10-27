@@ -1,7 +1,7 @@
 //! PDF 텍스트 추출.
 //!
 //! 엑셀에서 내보낸 PDF처럼 그리는 순서와 읽는 순서가 다른 문서가 있어서, 글자 좌표를 모아
-//! 줄 단위로 다시 정렬한다(기존 서비스 hybrid_extract.py와 같은 방식).
+//! 줄 단위로 다시 정렬한다(기존 서비스의 좌표 기반 추출과 같은 방식).
 //! 좌표 방식이 실패하거나 결과가 비면 pdf_extract의 기본 추출로 대신한다.
 
 use pdf_extract::{Document, MediaBox, OutputDev, OutputError, Transform};
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn wrong_widths_do_not_interleave_cells() {
-        // 폰트 폭 정보가 실제보다 커서 첫 칸 글자 x가 옆 칸(x=60)까지 밀린 경우 (ROYCO 43)
+        // 폰트 폭 정보가 실제보다 커서 첫 칸 글자 x가 옆 칸(x=60)까지 밀린 경우 (영문 17쪽 문서)
         let mut g = word_step("aquatic", 0.0, 0.0, 12.0); // 끝 x=84로 계산됨
         g.extend(word(": Cat 3", 60.0, 0.0));
         assert_eq!(layout_page(g), vec!["aquatic : Cat 3"]);
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn label_drawn_before_value_with_wrong_widths() {
-        // ROYCO 43: 글자마다 따로 그리고 폭이 1em로 잘못 잡혀 라벨 끝이 값(x=230)보다 오른쪽까지 밀림
+        // 영문 17쪽 문서: 글자마다 따로 그리고 폭이 1em로 잘못 잡혀 라벨 끝이 값(x=230)보다 오른쪽까지 밀림
         let mut g = word_step("Short-term (acute) aquatic", 92.0, 204.0, 10.0);
         g.extend(word_step("hazard", 92.0, 192.0, 10.0));
         g.extend(word("  : Category 3", 230.0, 204.0));

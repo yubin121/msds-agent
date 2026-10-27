@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn precheck_rejects_shuffled() {
-        // NO.6 터치크린 기존 추출 순서
+        // 엑셀로 만든 한글 문서의 기존 추출 순서
         let shuffled = [1, 3, 2, 5, 6, 7, 4, 8, 10, 9, 11, 12, 13, 14, 16, 15];
         assert_eq!(precheck(&shuffled).unwrap_err(), SHUFFLED_ERROR);
     }

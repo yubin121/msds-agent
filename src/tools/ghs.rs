@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// 그림문자 이름: 기존 서비스(5001) 표기. 툴 결과·DB·상세 API·legacy 응답·화면이 모두 이 표를 쓴다
+/// 그림문자 이름: 기존 서비스 표기. 툴 결과·DB·상세 API·legacy 응답·화면이 모두 이 표를 쓴다
 /// ("경고(느낌표)"는 신호어 "경고"와 헷갈려서 쓰지 않는다)
 pub const PICTOGRAMS: &[(&str, &str)] = &[
     ("GHS01", "폭발하는 폭탄"),
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn hydrofluoric_acid_kosha_case() {
-        // 34번 불산: GHS05(H290·H314·H318), GHS06(H310), GHS08(H370·H372), H317의 GHS07은 GHS06 때문에 생략
+        // 한글 5쪽 문서: GHS05(H290·H314·H318), GHS06(H310), GHS08(H370·H372), H317의 GHS07은 GHS06 때문에 생략
         let codes = ["H290", "H310", "H314", "H317", "H318", "H370", "H372"];
         assert_eq!(pics(&codes), vec!["GHS05", "GHS06", "GHS08"]);
     }

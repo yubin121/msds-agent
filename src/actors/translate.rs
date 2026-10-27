@@ -28,7 +28,7 @@ const MAX_PRODUCT_NO: i32 = 999;
 /// 원문에 없는 '→' 줄이 이 수 이상이면 원문·번역 쌍 형식으로 의심한다
 const PAIR_LINES_WARN: usize = 1;
 /// 페이지 머리말·꼬리말 후보: 페이지마다 맨 위·맨 아래에서 빈 줄을 뺀 이 수만큼의 줄
-/// (ARALDITE 머리말이 7줄이라 4줄로는 'Version…', 'Print Date' 줄이 빠졌다)
+/// (51쪽 다중 제품 문서의 머리말이 7줄이라 4줄로는 'Version…', 'Print Date' 줄이 빠졌다)
 const PAGE_EDGE_LINES: usize = 8;
 /// 머리말·꼬리말로 보려면 최소 이 페이지 수 이상에 나와야 한다(그리고 범위 페이지의 절반 이상)
 const MIN_FURNITURE_PAGES: usize = 3;
@@ -252,7 +252,7 @@ pub fn strip_furniture(text: &str, furniture: &BTreeSet<String>) -> String {
 }
 
 /// 제품별 페이지 범위: 그 제품의 첫 섹션 페이지부터 다음 제품의 첫 페이지까지(경계 페이지는 양쪽에 포함), 마지막 제품은 끝 페이지까지.
-/// 다중 제품 문서는 제품마다 머리말이 달라(ARALDITE RESIN 28쪽, HARDENER 23쪽) 문서 전체로 세면 절반에 못 미친다.
+/// 다중 제품 문서는 제품마다 머리말이 달라(51쪽 다중 제품 문서: 제품 1 28쪽, 제품 2 23쪽) 문서 전체로 세면 절반에 못 미친다.
 /// starts는 (product_no, 첫 페이지)이고 product_no 순서
 pub fn product_page_ranges(starts: &[(i32, i32)], last_page: i32) -> Vec<(i32, RangeInclusive<i32>)> {
     starts
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn page_ranges_per_product() {
         assert_eq!(product_page_ranges(&[(1, 1)], 6), [(1, 1..=6)]);
-        // ARALDITE: 제품 2가 29쪽에서 시작 → 경계 페이지는 양쪽에
+        // 51쪽 다중 제품 문서: 제품 2가 29쪽에서 시작 → 경계 페이지는 양쪽에
         assert_eq!(product_page_ranges(&[(1, 1), (2, 29)], 51), [(1, 1..=29), (2, 29..=51)]);
         assert!(product_page_ranges(&[], 5).is_empty());
     }
@@ -891,13 +891,13 @@ body";
 
     #[test]
     fn tokens_from_original() {
-        let original = "Air Tool Lubricant\nPetroleum oil 64742-54-7, 64742-65-0 >99%\n\
+        let original = "Sample Lubricant\nPetroleum oil 64742-54-7, 64742-65-0 >99%\n\
                         H301+H311 Toxic. H360Fd May damage fertility. EUH066 dryness.\n\
                         P280 Wear gloves. P301+P310: IF SWALLOWED\n\
                         Revised 2021-09-27, tel (216) 566-2902, bad CAS 7732-18-4";
         assert_eq!(
-            preserved_tokens(original, Some("Air Tool Lubricant")),
-            ["64742-54-7", "64742-65-0", "H301", "H311", "H360", "P280", "P301", "P310", "Air Tool Lubricant"]
+            preserved_tokens(original, Some("Sample Lubricant")),
+            ["64742-54-7", "64742-65-0", "H301", "H311", "H360", "P280", "P301", "P310", "Sample Lubricant"]
         );
         // 제품명이 원문 섹션에 없으면 확인하지 않는다
         assert!(!preserved_tokens("H225", Some("Other")).contains(&"Other".to_string()));
@@ -905,13 +905,13 @@ body";
 
     #[test]
     fn post_check_reports_missing() {
-        let original = "Product: Air Tool Lubricant\nH315 Causes skin irritation. CAS 128-37-0";
-        let good = "제품: Air Tool Lubricant\nH315 피부에 자극을 일으킴. CAS 128-37-0";
-        assert!(missing_in_translation(original, good, Some("Air Tool Lubricant")).is_empty());
+        let original = "Product: Sample Lubricant\nH315 Causes skin irritation. CAS 128-37-0";
+        let good = "제품: Sample Lubricant\nH315 피부에 자극을 일으킴. CAS 128-37-0";
+        assert!(missing_in_translation(original, good, Some("Sample Lubricant")).is_empty());
         // 한글 조사가 붙어 있어도 남아 있으면 통과
         assert!(missing_in_translation("H315", "H315을 보라", None).is_empty());
 
-        let bad = "제품: 에어 툴 윤활유\nH316 피부 자극. CAS 128-37-0";
-        assert_eq!(missing_in_translation(original, bad, Some("Air Tool Lubricant")), ["H315", "Air Tool Lubricant"]);
+        let bad = "제품: 샘플 윤활유\nH316 피부 자극. CAS 128-37-0";
+        assert_eq!(missing_in_translation(original, bad, Some("Sample Lubricant")), ["H315", "Sample Lubricant"]);
     }
 }

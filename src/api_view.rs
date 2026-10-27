@@ -169,7 +169,7 @@ pub fn merge_translations(rows: &[(i32, i32, i32, Option<String>, Option<String>
         .collect()
 }
 
-// ---- legacy (기존 서비스 5001과 같은 응답) ----
+// ---- legacy (기존 서비스와 같은 응답) ----
 
 /// 기존 서비스의 "비공개" 판정 값 (앞뒤 공백 무시, null은 대소문자 무시)
 const LEGACY_PRIVATE: [&str; 5] = ["비공개", "영업비밀", "", "-", "null"];
@@ -433,8 +433,8 @@ mod tests {
 
     #[test]
     fn product_names_unique() {
-        let products = [(1, Some("POLANE".to_string())), (2, None), (3, Some(" POLANE ".to_string())), (4, Some("".into()))];
-        assert_eq!(unique_product_names(&products), vec!["POLANE", "제품 2", "POLANE (2)", "제품 4"]);
+        let products = [(1, Some("Sample Coating".to_string())), (2, None), (3, Some(" Sample Coating ".to_string())), (4, Some("".into()))];
+        assert_eq!(unique_product_names(&products), vec!["Sample Coating", "제품 2", "Sample Coating (2)", "제품 4"]);
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn legacy_body_shape() {
-        let products = vec![legacy("ATL", &[("Mineral oil", "60-100", "64742-54-7, 64742-65-0")])];
+        let products = vec![legacy("Sample Lubricant", &[("Mineral oil", "60-100", "64742-54-7, 64742-65-0")])];
         let hazards = [
             haz(1, Some("H315"), Some("GHS07"), "document"),
             haz(1, Some("H319"), Some("GHS07"), "document"),
@@ -476,11 +476,11 @@ mod tests {
         ];
         let v = legacy_body(&products, &hazards);
         assert_eq!(v["status"], 200);
-        assert_eq!(v["product"]["ATL"][0]["casno"], "64742-54-7, 64742-65-0");
-        assert!(v["product"]["ATL"][0].get("cas_valid").is_none());
+        assert_eq!(v["product"]["Sample Lubricant"][0]["casno"], "64742-54-7, 64742-65-0");
+        assert!(v["product"]["Sample Lubricant"][0].get("cas_valid").is_none());
         assert_eq!(v["hazard_symbol"].as_array().unwrap().len(), 1);
         assert_eq!(v["hazard_symbol"][0]["symbol_name"], "감탄부호");
-        assert_eq!(v["hazard_symbol"][0]["product_name"], "ATL");
+        assert_eq!(v["hazard_symbol"][0]["product_name"], "Sample Lubricant");
         // image는 GHS07.png 파일 그대로의 base64
         let image = base64::engine::general_purpose::STANDARD
             .decode(v["hazard_symbol"][0]["image"].as_str().unwrap())

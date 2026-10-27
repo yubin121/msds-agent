@@ -140,11 +140,11 @@ mod tests {
         let lines = vec![
             (1, 1, "SECTION 1"),
             (1, 2, ""),
-            (1, 3, "  Product name : 터치크린  "),
+            (1, 3, "  Product name : 샘플세정제  "),
             (2, 1, long.as_str()),
         ];
         let out = following_lines(&lines, 0);
-        assert_eq!(out, vec!["Product name : 터치크린".to_string(), "가".repeat(120)]);
+        assert_eq!(out, vec!["Product name : 샘플세정제".to_string(), "가".repeat(120)]);
         assert!(following_lines(&lines, 3).is_empty());
 
         let many: Vec<(i32, usize, &str)> = (1..=20).map(|i| (1, i, "x")).collect();

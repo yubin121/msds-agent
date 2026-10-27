@@ -106,7 +106,7 @@ mod tests {
         assert!(backsteps(&[1, 2, 3, 4, 5, 16]).is_empty());
         // 다음 제품(1로 돌아감)과 이어지는 페이지의 반복 제목(같은 번호)은 정상
         assert!(backsteps(&[1, 2, 16, 1, 2, 2, 3, 16, 1]).is_empty());
-        // NO.6 터치크린 기존 추출 순서
+        // 엑셀로 만든 한글 문서의 기존 추출 순서
         let shuffled = [1, 3, 2, 5, 6, 7, 4, 8, 10, 9, 11, 12, 13, 14, 16, 15];
         assert_eq!(backsteps(&shuffled), vec![(2, 3, 2), (6, 7, 4), (9, 10, 9), (15, 16, 15)]);
         assert!(backsteps(&[]).is_empty());

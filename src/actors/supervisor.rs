@@ -18,7 +18,7 @@ use super::{Agent, AgentActor, AgentDone, AgentMsg, TIMEOUT_ERROR};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 const TIMEOUT_SECS_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
-/// 기존 host-runner의 "한 번에 최대 3건"
+/// 기존 클라이언트의 "한 번에 최대 3건"
 const DEFAULT_MAX_CONCURRENT_DOCS: usize = 3;
 const MAX_CONCURRENT_DOCS_RANGE: std::ops::RangeInclusive<usize> = 1..=10;
 /// error 요약에서 에이전트 하나의 이유 최대 글자 수
