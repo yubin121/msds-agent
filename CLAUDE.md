@@ -1,6 +1,7 @@
 # 작업 규칙
 - ../pekko-agent, ../rust-pekko 폴더는 읽기 전용이다. 어떤 파일도 수정·생성·삭제하지 마라.
 - git push, git remote add는 금지다. 이 프로젝트는 로컬 전용이다.
+- 혼자 쓰는 로컬 저장소라 main 브랜치에서 바로 작업한다(전역 규칙의 feature 브랜치는 적용하지 않음). 커밋은 사용자가 검증한 뒤에 한다.
 - API 키는 .env에만 둔다. 코드, 로그, 커밋에 키를 넣지 마라.
 - 경로는 상대 경로만 쓴다. Windows와 macOS 모두에서 빌드되어야 한다.
 - 한 단계씩 작업하고, 매 단계 cargo build로 확인한다.
@@ -15,7 +16,7 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 흐름: 업로드 → 총괄에 Analyze → 추출 tell → 완료 시 성분·그림문자·번역에 동시 tell(한글 문서는 번역 생략) → AgentDone 수집 → 상태 저장(분석중/완료/부분 완료/실패), 10분 타임아웃
 - 에이전트 액터: receive에서 tokio::spawn으로 내 툴 루프 실행, 끝나면 reply_to.tell(AgentDone)
 - 에이전트마다 자기 시스템 프롬프트(순서가 아니라 목표)와 자기 툴만 담은 ToolRegistry를 갖는다
-- 메시지에는 doc_id와 섹션 번호만 담는다. 결과는 각 에이전트가 저장 툴로 DB에 직접 저장한다
+- 메시지에는 doc_id, run_id, deadline, 섹션 번호만 담는다. 결과는 각 에이전트가 저장 툴로 DB에 직접 저장한다
 - 툴: msds_find_headings, msds_save_sections, msds_get_section, msds_save_components(CAS 체크섬 검증, 틀리면 ToolOutput::error), msds_save_hazards, msds_save_translation
   - msds_doc_info {doc_id} → {file_name, page_count, language, products:[{product_no, product_name, section_nos}]}
   - msds_find_headings {doc_id} → {headings:[{page_no, line_no, number, text(120자), following_lines?}], total_found, truncated, order_ok, backsteps} (최대 200개, 판단은 모델. order_ok=false면 저장하지 말고 보고. 1번 섹션 후보만 아래 빈 줄 아닌 10줄(줄마다 120자)을 following_lines로 준다)
@@ -50,11 +51,13 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 샘플 PDF와 업로드 파일은 data/ 아래에만 둔다 (git 제외)
 
 # 에이전트 구조 (src/actors/, 프롬프트는 src/prompts.rs)
-- AgentActor<R>: Run { doc_id, reply_to: ActorRef<R> }를 받으면 tokio::spawn으로 작업을 띄우고 바로 돌아온다. R::Message는 From<AgentDone>
-- 작업이 끝나면(panic 포함) msds_agent_runs에 한 행(ok, error, rounds, 토큰, 시작·끝 시각)을 남기고 reply_to.tell(AgentDone)
+- AgentActor<R>: Run { doc_id, run_id, deadline, reply_to: ActorRef<R> }를 받으면 tokio::spawn으로 작업을 띄우고 바로 돌아온다. R::Message는 From<AgentDone>
+  - run_id는 총괄 액터의 분석 실행 번호(agent-test 단독 실행은 None), deadline은 분석 마감(None이면 제한 없음)
+- 작업이 끝나면(panic 포함) msds_agent_runs에 한 행(ok, error, rounds, 토큰, 시작·끝 시각, pipeline_run_id=run_id)을 남기고 reply_to.tell(AgentDone). AgentDone에도 run_id를 담는다
 - ToolRegistry는 실행마다 그 에이전트의 툴만 담아 새로 만든다: 추출 = find_headings, save_sections / 성분 = get_section, save_components / 그림문자 = get_section, save_hazards / 번역은 툴 없음(아래 번역 에이전트 참고)
 - max_tokens: 추출 4096, 성분 8192, 그림문자 4096, 번역 8192
 - 테스트: cargo run -- agent-test <extract|components|both|hazards|translate> <doc_id> (both는 추출 실패 시 성분 생략)
+- 전체 분석 테스트: cargo run -- pipeline-test <doc_id> (서버 없이 총괄 액터로 분석, 최종 status·error·시간, 에이전트별 ok·시간·호출 수·토큰·model·추정 비용, pipeline_run_id로 합산한 문서 전체 비용 출력. 시간 초과 뒤 늦게 끝나는 에이전트는 최대 300초 기다려 함께 출력)
 
 # 사전 검사 (실패하면 Claude를 부르지 않고 ok=false)
 - 추출: 제목 후보의 서로 다른 번호가 8개 미만 → "MSDS 문서가 아닌 것으로 보입니다(섹션 제목 부족)", 순서가 뒤로 가면(backsteps) → "섹션 순서가 뒤섞인 문서입니다"
@@ -119,6 +122,24 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 - 성공 판정: 대상 섹션 중 원문에 있는 섹션이 모두 저장되면 ok. 빠지면 ok=false, error에 섹션 번호
 - 경고(실패 아님, 실행 기록 error에 남김): 사후 검사 결과, stop_reason이 max_tokens인 응답, 섹션 번역 오류
 
+# 총괄 액터 (src/actors/supervisor.rs, LLM 호출 없음)
+- 메시지: Analyze { doc_id }, AgentDone(From<AgentDone>), Timeout { doc_id, run_id }
+- 규칙은 순수 상태 기계 Pipeline(Action만 돌려줌)과 순수 함수 decide에 두고, 액터는 Action을 DB·tell로 실행한다(DB·LLM 없이 단위 테스트)
+- 흐름: Analyze → 대기열 → 시작 시 run_id(UUID) 생성, status 'analyzing', 이전 결과(msds_sections, msds_components, msds_hazards, msds_translations) 삭제(msds_pages는 남김), 타이머 → 추출 Run → 추출 ok면 성분·그림문자·번역에 동시에 Run, 실패면 나머지를 부르지 않고 failed
+  - 이전 결과를 지우는 이유: 재분석에서 추출이 실패하거나 제품 수가 줄면 예전 행이 남는다
+- 상태 이름: queued(대기) / analyzing(분석중) / done(완료) / partial(부분 완료) / failed(실패). 업로드 직후·검증 실패는 기존대로 uploaded / failed
+- 판정(decide): 추출 실패 → failed / 성분·그림문자·번역 모두 ok → done / 일부 ok → partial / 모두 실패 → failed. 한글 문서 번역 생략은 ok
+- msds_documents.error: 실패한 에이전트마다 "번역: 시간 초과"처럼 한 줄(에이전트 error의 첫 항목, 200자까지)
+- 시간 제한: MSDS_DOC_TIMEOUT_SECS(기본 600, 10~3600). 분석 시작부터 잰다(대기열 시간 제외). 지나면 끝나지 않은 에이전트를 "시간 초과" 실패로 보고 같은 규칙으로 판정(추출이 안 끝났으면 failed)
+  - 번역 에이전트는 조각을 시작하기 전과 저장하기 직전에 deadline을 확인하고, 지났으면 시작·저장하지 않는다(마감 뒤에 끝난 조각이 다음 실행 결과에 섞이지 않게)
+- run_id가 지금 실행 중인 것과 다른 AgentDone·Timeout(판정 뒤 늦게 온 것, 이전 실행의 것)은 상태를 바꾸지 않고 로그만 남긴다
+- 시간 초과 뒤에도 일하는 에이전트가 있으면, 그 에이전트들이 끝날 때까지 같은 문서의 새 분석은 대기열에서 기다린다(이전 실행이 새 결과를 지우거나 덮지 않게)
+- 이미 분석 중이거나 대기 중인 doc_id의 Analyze는 무시하고 로그만 남긴다
+- 동시 분석: MSDS_MAX_CONCURRENT_DOCS(기본 3, 1~10). 넘으면 대기열, 하나가 끝나면 다음을 시작한다. 근거: 기존 host-runner의 "한 번에 최대 3건"
+- 재시작 복구: 서버 시작 때 status가 analyzing·queued인 문서를 failed(error "서버 재시작으로 중단")로 바꾼다. 액터 상태는 메모리에만 있어 이어서 할 수 없기 때문이다
+- API: 업로드 검증·저장이 성공하면 status 'queued'로 저장하고 Analyze를 tell, 바로 응답(status "queued"). POST /api/msds/:id/analyze는 재분석(202, 없는 문서 404, analyzing·queued면 409)
+- 비용: src/cost.rs의 단가 표(100만 토큰당 USD, claude-sonnet-5-5 입력 2 / 출력 10, claude-haiku-5-5 0.1 / 0.5). 표에 없는 모델은 비용을 비운다
+
 # 번역 사후 검사 (순수 함수 post_check, 모두 실패가 아니라 경고)
 - 보존 토큰(preserved_tokens, missing_in_translation): 원문 섹션에서 체크섬이 맞는 CAS 번호, H코드(H200~H499, H360Fd는 H360), P코드(P100~P599), 제품명(원문 섹션에 있을 때)을 뽑아 번역문(조각을 이어 붙인 것)에 그대로 있는지 본다
   - ASCII 단어 경계로 찾아 한글 조사가 붙어도("H301을") 인식한다. EUH 코드는 보지 않는다
@@ -130,6 +151,8 @@ DB는 docker-compose.yml의 PostgreSQL(포트 5433, DB 이름 msds)을 쓴다.
 # 환경변수 (개발·비용 조절용, .env.example 참고)
 - MSDS_MAX_ROUNDS: 툴 루프 최대 라운드(기본 10, 1~20)
 - MSDS_TRANSLATE_CONCURRENCY: 번역 섹션 동시 실행 수(기본 4, 1~16)
+- MSDS_DOC_TIMEOUT_SECS: 문서 1건 분석 제한 시간(초, 기본 600, 10~3600)
+- MSDS_MAX_CONCURRENT_DOCS: 동시에 분석하는 문서 수(기본 3, 1~10)
 - MSDS_TRANSLATE_SECTIONS: 번역할 섹션(예: "1-4,7,8", 비어 있으면 1~16). 형식이 틀리면 번역 에이전트가 ok=false
 - MSDS_TRANSLATE_PRODUCTS: 번역할 제품(예: "1", "1-2", 비어 있으면 전부). 형식이 틀리면 번역 에이전트가 ok=false
 - 명령 앞에 붙인 환경변수가 .env보다 우선한다(dotenvy는 이미 있는 값을 덮어쓰지 않음). 예: CLAUDE_MODEL_TRANSLATE=claude-sonnet-5-5 cargo run -- agent-test translate <doc_id>

@@ -7,6 +7,7 @@
 pub mod components;
 pub mod extract;
 pub mod hazards;
+pub mod supervisor;
 pub mod translate;
 
 use std::collections::BTreeMap;
@@ -17,12 +18,13 @@ use async_trait::async_trait;
 use pekko_actor::{Actor, ActorContext, ActorRef};
 use pekko_agent_llm::ClaudeClient;
 use sqlx::PgPool;
+use tokio::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::tool_loop::LoopResult;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Agent {
     Extract,
     Components,
@@ -39,6 +41,16 @@ impl Agent {
             Agent::Components => "components",
             Agent::Hazards => "hazards",
             Agent::Translate => "translate",
+        }
+    }
+
+    /// 문서 error 요약에 쓰는 이름
+    pub fn label_ko(self) -> &'static str {
+        match self {
+            Agent::Extract => "추출",
+            Agent::Components => "성분",
+            Agent::Hazards => "그림문자",
+            Agent::Translate => "번역",
         }
     }
 
@@ -61,6 +73,12 @@ pub fn log_models() {
 }
 
 pub const NO_SECTIONS_ERROR: &str = "추출 결과 없음";
+pub const TIMEOUT_ERROR: &str = "시간 초과";
+
+/// 분석 마감이 지났는지 (None은 제한 없음)
+pub fn past_deadline(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|d| Instant::now() >= d)
+}
 
 /// msds_sections에 저장된 제품 목록 (product_no, product_name)
 pub async fn load_products(pool: &PgPool, doc_id: Uuid) -> Result<Vec<(i32, Option<String>)>, String> {
@@ -109,14 +127,17 @@ pub fn check_rows_per_product(products: &[i32], counts: &BTreeMap<i32, i64>, wha
 }
 
 /// 에이전트 액터가 받는 메시지. R은 AgentDone을 받을 액터다.
+/// run_id는 총괄 액터의 분석 실행 번호(agent-test 단독 실행은 None),
+/// deadline은 분석 마감(번역이 새 조각을 시작하거나 저장하기 전에 확인한다, None이면 제한 없음)
 pub enum AgentMsg<R: Actor> {
-    Run { doc_id: Uuid, reply_to: ActorRef<R> },
+    Run { doc_id: Uuid, run_id: Option<Uuid>, deadline: Option<Instant>, reply_to: ActorRef<R> },
 }
 
 /// 에이전트 작업 완료 보고
 #[derive(Debug, Clone)]
 pub struct AgentDone {
     pub doc_id: Uuid,
+    pub run_id: Option<Uuid>,
     pub agent: Agent,
     pub ok: bool,
     pub error: Option<String>,
@@ -185,14 +206,14 @@ where
 
     async fn receive(&mut self, msg: Self::Message, _ctx: &mut ActorContext<Self>) {
         match msg {
-            AgentMsg::Run { doc_id, reply_to } => {
+            AgentMsg::Run { doc_id, run_id, deadline, reply_to } => {
                 let (agent, client, pool) = (self.agent, self.client.clone(), self.pool.clone());
                 let model = self.model.clone();
                 info!(agent = agent.as_str(), model = &*model, %doc_id, "에이전트 작업 시작");
                 tokio::spawn(async move {
                     let started_at = chrono::Utc::now();
                     // 작업이 panic해도 기록과 보고는 남긴다
-                    let outcome = match tokio::spawn(run_job(agent, client, pool.clone(), doc_id)).await {
+                    let outcome = match tokio::spawn(run_job(agent, client, pool.clone(), doc_id, deadline)).await {
                         Ok(o) => o,
                         Err(e) => JobOutcome::failed(format!("에이전트 작업이 비정상 종료되었습니다: {e}")),
                     };
@@ -200,6 +221,7 @@ where
 
                     let run = crate::db::AgentRun {
                         doc_id,
+                        pipeline_run_id: run_id,
                         agent: agent.as_str(),
                         model: &model,
                         ok: outcome.ok,
@@ -224,6 +246,7 @@ where
 
                     let done = AgentDone {
                         doc_id,
+                        run_id,
                         agent,
                         ok: outcome.ok,
                         error: outcome.error,
@@ -241,12 +264,18 @@ where
     }
 }
 
-async fn run_job(agent: Agent, client: Arc<ClaudeClient>, pool: PgPool, doc_id: Uuid) -> JobOutcome {
+async fn run_job(
+    agent: Agent,
+    client: Arc<ClaudeClient>,
+    pool: PgPool,
+    doc_id: Uuid,
+    deadline: Option<Instant>,
+) -> JobOutcome {
     let result = match agent {
         Agent::Extract => extract::run(&client, &pool, doc_id).await,
         Agent::Components => components::run(&client, &pool, doc_id).await,
         Agent::Hazards => hazards::run(&client, &pool, doc_id).await,
-        Agent::Translate => translate::run(&client, &pool, doc_id).await,
+        Agent::Translate => translate::run(&client, &pool, doc_id, deadline).await,
     };
     result.unwrap_or_else(JobOutcome::failed)
 }

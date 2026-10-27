@@ -51,7 +51,7 @@ pub async fn run(pool: PgPool, mode: &str, doc_id: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let started = Instant::now();
         actor
-            .tell(AgentMsg::Run { doc_id, reply_to: collector.clone() })
+            .tell(AgentMsg::Run { doc_id, run_id: None, deadline: None, reply_to: collector.clone() })
             .map_err(|e| format!("{} 액터에 Run 전송 실패: {e}", agent.as_str()))?;
         let done = rx.recv().await.ok_or("AgentDone을 받지 못했습니다")?;
         if done.doc_id != doc_id {

@@ -1,8 +1,10 @@
 mod actors;
 mod agent_test;
 mod api;
+mod cost;
 mod db;
 mod pdf;
+mod pipeline_test;
 mod prompts;
 mod tool_loop;
 mod tools;
@@ -51,13 +53,25 @@ async fn main() {
             }
             return;
         }
-        // cargo run -- agent-test <extract|components|both> <doc_id> : 에이전트 액터를 실행하고 결과 출력
+        // cargo run -- agent-test <extract|components|both|hazards|translate> <doc_id> : 에이전트 액터를 실행하고 결과 출력
         Some("agent-test") => {
             let (Some(mode), Some(doc_id)) = (args.get(1), args.get(2)) else {
-                tracing::error!("사용법: cargo run -- agent-test <extract|components|both> <doc_id>");
+                tracing::error!("사용법: cargo run -- agent-test <extract|components|both|hazards|translate> <doc_id>");
                 std::process::exit(2);
             };
             if let Err(e) = agent_test::run(pool, mode, doc_id).await {
+                tracing::error!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // cargo run -- pipeline-test <doc_id> : 총괄 액터로 전체 분석을 실행하고 판정·비용 출력
+        Some("pipeline-test") => {
+            let Some(doc_id) = args.get(1) else {
+                tracing::error!("사용법: cargo run -- pipeline-test <doc_id>");
+                std::process::exit(2);
+            };
+            if let Err(e) = pipeline_test::run(pool, doc_id).await {
                 tracing::error!("{e}");
                 std::process::exit(1);
             }
@@ -92,11 +106,29 @@ async fn main() {
             return;
         }
         Some(other) => {
-            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, tool-test, validate-docs, reextract 또는 인자 없이 서버 실행)");
+            tracing::error!("알 수 없는 명령: {other} (loop-test, agent-test, pipeline-test, tool-test, validate-docs, reextract 또는 인자 없이 서버 실행)");
             std::process::exit(2);
         }
         None => {}
     }
+
+    // 분석 중·대기 중이던 문서는 이어서 할 수 없으므로 실패로 남긴다
+    match db::recover_interrupted(&pool).await {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("서버 재시작으로 중단된 문서 {n}건을 failed로 바꿨습니다"),
+        Err(e) => {
+            tracing::error!("재시작 복구 실패: {e}");
+            std::process::exit(1);
+        }
+    }
+    let system = pekko_actor::ActorSystem::new("msds");
+    let supervisor = match actors::supervisor::spawn(&system, pool.clone(), None).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("액터 시작 실패: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".into());
     let addr = format!("0.0.0.0:{port}");
@@ -110,7 +142,7 @@ async fn main() {
     tracing::info!("msds-agent 시작: http://{addr} (model {model})");
     actors::log_models();
 
-    let app = api::router(api::AppState { pool });
+    let app = api::router(api::AppState { pool, supervisor });
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!("서버 오류: {e}");
     }

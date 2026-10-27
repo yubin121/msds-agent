@@ -98,6 +98,8 @@ const MIGRATIONS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS msds_agent_runs_doc_idx ON msds_agent_runs (doc_id)",
     // 에이전트별 모델 (CLAUDE_MODEL_*)
     "ALTER TABLE msds_agent_runs ADD COLUMN IF NOT EXISTS model TEXT",
+    // Step 9: 총괄 액터의 분석 실행 번호 (agent-test 단독 실행은 NULL). 문서 1건 분석의 합계용
+    "ALTER TABLE msds_agent_runs ADD COLUMN IF NOT EXISTS pipeline_run_id UUID",
 ];
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -157,6 +159,7 @@ pub async fn save_pages(pool: &PgPool, doc_id: uuid::Uuid, pages: &[String]) -> 
 
 pub struct AgentRun<'a> {
     pub doc_id: uuid::Uuid,
+    pub pipeline_run_id: Option<uuid::Uuid>,
     pub agent: &'a str,
     pub model: &'a str,
     pub ok: bool,
@@ -172,8 +175,9 @@ pub struct AgentRun<'a> {
 pub async fn save_agent_run(pool: &PgPool, run: &AgentRun<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO msds_agent_runs \
-         (doc_id, agent, model, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         (doc_id, agent, model, ok, error, rounds, input_tokens, output_tokens, started_at, finished_at, \
+          pipeline_run_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(run.doc_id)
     .bind(run.agent)
@@ -185,9 +189,45 @@ pub async fn save_agent_run(pool: &PgPool, run: &AgentRun<'_>) -> Result<(), sql
     .bind(run.output_tokens as i32)
     .bind(run.started_at)
     .bind(run.finished_at)
+    .bind(run.pipeline_run_id)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// 문서 status와 error를 바꾼다 (error None이면 지운다).
+pub async fn set_status(pool: &PgPool, doc_id: uuid::Uuid, status: &str, error: Option<&str>) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE msds_documents SET status = $2, error = $3, updated_at = now() WHERE id = $1")
+        .bind(doc_id)
+        .bind(status)
+        .bind(error)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 재분석 전에 이전 분석 결과를 지운다. msds_pages(원문)는 남긴다.
+pub async fn clear_results(pool: &PgPool, doc_id: uuid::Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    for table in ["msds_sections", "msds_components", "msds_hazards", "msds_translations"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE doc_id = $1")).bind(doc_id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub const RESTART_ERROR: &str = "서버 재시작으로 중단";
+
+/// 서버 시작 때: 분석 중·대기 중이던 문서는 이어서 할 수 없으므로 failed로 바꾼다. 바꾼 문서 수를 돌려준다.
+pub async fn recover_interrupted(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE msds_documents SET status = 'failed', error = $1, updated_at = now() \
+         WHERE status IN ('analyzing', 'queued')",
+    )
+    .bind(RESTART_ERROR)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 /// 문서를 status 'failed'로 바꾸고 이유를 남긴다.

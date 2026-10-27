@@ -11,8 +11,10 @@ use axum::{
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
+use pekko_actor::ActorRef;
 use uuid::Uuid;
 
+use crate::actors::supervisor::{Supervisor, SupervisorMsg};
 use crate::validate;
 use crate::{db, pdf};
 
@@ -25,6 +27,7 @@ const PREVIEW_CHARS: usize = 300;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    pub supervisor: ActorRef<Supervisor>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -34,6 +37,7 @@ pub fn router(state: AppState) -> Router {
             post(upload).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)),
         )
         .route("/api/msds/:id/pages", get(pages))
+        .route("/api/msds/:id/analyze", post(analyze))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -115,12 +119,37 @@ async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<
     }
 
     tracing::info!(%doc_id, page_count, language, fallback = extracted.fallback, "업로드 완료");
+    queue_analysis(&st, doc_id).await?;
     Ok(Json(json!({
         "doc_id": doc_id,
         "file_name": file_name,
         "page_count": page_count,
         "language": language,
+        "status": "queued",
     })))
+}
+
+/// 이미 올린 문서를 다시 분석한다. 분석 중이거나 대기 중이면 409.
+async fn analyze(State(st): State<AppState>, Path(id): Path<Uuid>) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let status: Option<(String,)> = sqlx::query_as("SELECT status FROM msds_documents WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&st.pool)
+        .await
+        .map_err(internal)?;
+    let Some((status,)) = status else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "문서를 찾을 수 없습니다".into()));
+    };
+    if matches!(status.as_str(), "analyzing" | "queued") {
+        return Err(ApiError(StatusCode::CONFLICT, "이미 분석 중인 문서입니다".into()));
+    }
+    queue_analysis(&st, id).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "doc_id": id, "status": "queued" }))))
+}
+
+/// status를 'queued'로 저장하고 총괄 액터에 Analyze를 보낸다(응답은 기다리지 않음)
+async fn queue_analysis(st: &AppState, doc_id: Uuid) -> Result<(), ApiError> {
+    db::set_status(&st.pool, doc_id, "queued", None).await.map_err(internal)?;
+    st.supervisor.tell(SupervisorMsg::Analyze { doc_id }).map_err(|e| internal(format!("총괄 액터에 Analyze 전송 실패: {e}")))
 }
 
 /// 업로드 검증 실패: 문서를 failed로 남기고 400으로 응답한다

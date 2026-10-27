@@ -11,10 +11,11 @@ use regex::Regex;
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::{load_products, JobOutcome, NO_SECTIONS_ERROR};
+use super::{load_products, past_deadline, JobOutcome, NO_SECTIONS_ERROR, TIMEOUT_ERROR};
 use crate::prompts::{SECTION_TITLES_KO, TRANSLATE_CHUNK_CHARS, TRANSLATE_MAX_TOKENS, TRANSLATE_SYSTEM};
 use crate::tool_loop::call_once;
 use crate::tools::cas::{check_cas, CasCheck};
@@ -347,7 +348,12 @@ struct SectionRun {
     error: Option<String>,
 }
 
-pub async fn run(client: &Arc<ClaudeClient>, pool: &PgPool, doc_id: Uuid) -> Result<JobOutcome, String> {
+pub async fn run(
+    client: &Arc<ClaudeClient>,
+    pool: &PgPool,
+    doc_id: Uuid,
+    deadline: Option<Instant>,
+) -> Result<JobOutcome, String> {
     let language: Option<(Option<String>,)> = sqlx::query_as("SELECT language FROM msds_documents WHERE id = $1")
         .bind(doc_id)
         .fetch_optional(pool)
@@ -402,7 +408,7 @@ pub async fn run(client: &Arc<ClaudeClient>, pool: &PgPool, doc_id: Uuid) -> Res
         let (client, pool, semaphore) = (client.clone(), pool.clone(), semaphore.clone());
         set.spawn(async move {
             let _permit = semaphore.acquire_owned().await.expect("세마포어가 닫혔습니다");
-            translate_section(&client, &pool, doc_id, job).await
+            translate_section(&client, &pool, doc_id, job, deadline).await
         });
     }
 
@@ -443,7 +449,13 @@ pub async fn run(client: &Arc<ClaudeClient>, pool: &PgPool, doc_id: Uuid) -> Res
     Ok(outcome)
 }
 
-async fn translate_section(client: &ClaudeClient, pool: &PgPool, doc_id: Uuid, job: SectionJob) -> SectionRun {
+async fn translate_section(
+    client: &ClaudeClient,
+    pool: &PgPool,
+    doc_id: Uuid,
+    job: SectionJob,
+    deadline: Option<Instant>,
+) -> SectionRun {
     let mut run = SectionRun {
         product_no: job.product_no,
         section_no: job.section_no,
@@ -472,6 +484,11 @@ async fn translate_section(client: &ClaudeClient, pool: &PgPool, doc_id: Uuid, j
     }
     let total = chunks.len();
     for (i, chunk) in chunks.iter().copied().enumerate() {
+        if past_deadline(deadline) {
+            info!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, "마감이 지나 새 조각을 시작하지 않음");
+            run.error = Some(TIMEOUT_ERROR.into());
+            break;
+        }
         // 제목은 코드가 title_ko로 넣으므로 조각 0의 제목 줄은 번역하지 않는다
         let source = if i == 0 { strip_title_line(chunk, &job.title) } else { chunk };
         // 페이지 머리말·꼬리말은 번역하지 않는다(페이지 경계에서 지우거나 문장을 중복하는 일이 있었다)
@@ -480,6 +497,7 @@ async fn translate_section(client: &ClaudeClient, pool: &PgPool, doc_id: Uuid, j
         let text_ko = if source.trim().is_empty() {
             String::new()
         } else {
+            info!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, "번역 조각 시작");
             match translate_chunk(client, &job, source, i, total).await {
                 Ok((text, call)) => {
                     run.rounds += 1;
@@ -497,6 +515,12 @@ async fn translate_section(client: &ClaudeClient, pool: &PgPool, doc_id: Uuid, j
                 }
             }
         };
+        // 마감 뒤에 끝난 조각은 저장하지 않는다(다음 실행의 결과에 섞이지 않게)
+        if past_deadline(deadline) {
+            info!(%doc_id, product_no = job.product_no, section_no = job.section_no, chunk_no = i, "마감이 지나 조각을 저장하지 않음");
+            run.error = Some(TIMEOUT_ERROR.into());
+            break;
+        }
         let saved = TranslationChunk {
             doc_id,
             product_no: job.product_no,
